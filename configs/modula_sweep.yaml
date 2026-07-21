@@ -1,0 +1,44 @@
+# Modula's spectral-norm update rule, compared against the already-run
+# adamw/muon/lamb/muon_per_head sweep (configs/optimizer_extensions_sweep.yaml)
+# -- kept as a SEPARATE config/output so the already-completed sweep doesn't
+# need to be rerun; results are merged at analysis time instead.
+#
+# Reuses Muon's LR grid as the starting point: both are spectral-norm-based
+# update rules operating at a similar effective scale (Modula caps only the
+# top singular value; Muon flattens the whole spectrum -- see
+# src/optimizers.py docstring), so Muon's grid is a reasonable guess, not a
+# tuned choice for Modula specifically.
+
+output_csv: results/optimizer_extensions/modula_sweep_results.csv
+
+data:
+  type: text
+
+model:
+  max_seq_len: 128
+  d_model: 128
+  n_layers: 4
+  n_heads: 4
+  mlp_ratio: 4
+  dropout: 0.0
+
+train:
+  batch_size: 64
+  seq_len: 128
+  max_steps: 500
+  eval_interval: 100
+  eval_iters: 20
+  divergence_threshold: 10000.0
+  device: auto
+
+sweep:
+  seeds: [0, 1, 2]
+
+  lr_grids:
+    modula: [6.325e-4, 1.517e-3, 3.557e-3, 8.434e-3, 2.000e-2, 4.743e-2, 1.125e-1, 2.667e-1, 6.325e-1]
+
+  optimizer_kwargs:
+    modula:
+      momentum: 0.95
+      power_iters: 2
+      adamw_lr: 3.0e-3

@@ -73,3 +73,7 @@ def test_optimizer_extensions_sweep_yaml_has_expected_structure():
         "configs/optimizer_extensions_sweep.yaml",
         {"adamw", "muon", "lamb", "muon_per_head"},
     )
+
+
+def test_modula_sweep_yaml_has_expected_structure():
+    _assert_sweep_config_structure("configs/modula_sweep.yaml", {"modula"})
