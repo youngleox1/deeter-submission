@@ -207,7 +207,16 @@ but the gap itself is real and is reported as such, not glossed over.
 | AdamW | 1.718 | (reference) | 0.375 |
 | **Muon** | **1.654** | **Yes** | **1.125 (3x wider)** |
 | SGD | 2.170 | No — never within 20% at any LR tested | diverges above lr≈0.71 (all seeds) |
-| Nero | 2.091 | No — never within 20% at any LR tested | n/a (never within threshold) |
+| Nero | 2.058 | No — within 20% at exactly one LR (0.03), zero-width basin | n/a |
+
+**Revision note:** an earlier version of this table used a meaningfully
+buggy Nero implementation (see `v0.5.0-nero-fix` tag / git history for the
+full diagnosis — no mean-centering, wrong re-projection target, sum-vs-mean
+second moment, spurious momentum on 1D params). Nero's numbers above are
+from the corrected implementation, matching the reference
+(github.com/jxbz/nero) closely. AdamW/SGD/Muon are unchanged (confirmed
+identical to prior digits — they weren't touched by the fix, and results
+are seeded/deterministic).
 
 Two separate findings, not one clean story:
 
@@ -216,14 +225,19 @@ Two separate findings, not one clean story:
    actually outside what the pre-declared criteria anticipated (the design
    assumed an architecture-aware method would trade a bit of best-case
    performance for a wider basin; Muon didn't have to make that trade here).
-2. **This simplified Nero reproduction underperforms AdamW substantially** —
-   a genuine negative result, not a bug (all of Nero's unit tests pass,
-   including the sphere-projection invariant). Plausible explanations, none
-   confirmed: no LR warmup/schedule is used here, the 1D-parameter fallback
-   (biases, norm affine params) is a simplification not in the original
-   paper, and Nero's reported benefits may show up more at larger scale or
-   longer training than this 500-step toy setting. This is reported as an
-   open question, not explained away.
+2. **The corrected Nero still underperforms AdamW substantially**, though
+   less than the buggy version did (best loss 2.058 vs the old 2.091; best
+   LR shifted a full decade, from 0.0023 to 0.03). At the loosest tested
+   threshold (X=20%) it now barely qualifies as "within range" — but at a
+   single LR point, not a range, so it has effectively zero basin width by
+   this metric regardless of implementation correctness. This is a genuine
+   negative result, not a bug (Nero's tests now check the correct
+   invariants — unit-norm + mean-zero per neuron after construction and
+   after every step — and all pass). Plausible explanations for the
+   remaining gap, none confirmed: no LR warmup/schedule is used here, and
+   Nero's reported benefits may show up more at larger scale or longer
+   training than this 500-step toy setting. Reported as an open question,
+   not explained away.
 
 **Divergence rate:** SGD is the only optimizer that diverges anywhere in its
 sampled grid (all 3 seeds, for every LR ≥ 0.71 — see
@@ -234,24 +248,74 @@ three, but AdamW (not architecture-aware, by this project's definition)
 also never diverges — so divergence avoidance alone doesn't cleanly
 distinguish "architecture-aware" from "not" in this experiment.
 
+### Ablation: does removing LayerNorm's affine params help Nero?
+
+Raised during review: Nero's projection assumes a neuron's weight scale
+(and, per the corrected implementation, its mean) is irrelevant because
+downstream normalization absorbs it — an assumption that weakens if the
+normalization layer itself has a learnable affine scale/shift (handled by
+a separate, uncoordinated update rule for 1D params). Tested directly:
+same LR grid/seeds/steps as the core sweep, `model.layernorm_affine=False`
+(`configs/ablation_nero_no_ln_affine.yaml`,
+`results/ablations/nero_no_ln_affine/sweep_results.csv`), rerun against the
+corrected Nero.
+
+**Result: mixed, not a clean confirmation or rejection.** At most LRs
+(0.0009 through 0.03, and again at 0.07), keeping the affine params does
+slightly better than removing them — the hypothesis is not supported
+there. But at lr=0.4, removing them is clearly better (2.85 vs 3.08), and
+at the highest LR (0.95), keeping them is much better (3.28 vs 5.71 —
+removing affine makes the high-LR degradation much worse, not better).
+So the honest read is: LayerNorm's affine params don't appear to be the
+main driver of Nero's overall underperformance (removing them doesn't
+fix it, and mostly makes things slightly worse) — but they do appear to
+provide some stabilizing effect specifically at high LR, which is the
+opposite direction from the original hypothesis. Reported as a
+tested-and-not-confirmed hypothesis with a genuine, unanticipated
+secondary finding, not retro-fitted into either story after the fact.
+
 ### Finance stretch results
-_TBD — sweep not yet run._
+_TBD — sweep rerunning with corrected Nero; see `finance-stretch` branch
+for the in-progress writeup and a separate investigation into whether any
+learnable signal exists in this data at all._
 
 ## Limitations
 
 - **X% was not pre-registered in a config file before the core sweep ran**
   (see Core experiment results above for how this is handled: all three
   candidate values are reported, and the conclusion is stable across them).
-- **Nero and Muon are simplified, from-scratch reproductions**, not verbatim
-  ports of reference implementations — see `src/optimizers.py` docstring for
-  exactly what's simplified. The Nero result above should be read as "this
-  simplified reproduction underperforms AdamW here," not as a claim about
-  the original published method.
+- **No LR schedule of any kind is used anywhere in this project** — every
+  run is a flat, constant LR for its full duration, no warmup, no decay.
+  This is a real limitation, not specific to any one optimizer: it likely
+  understates AdamW's usable LR range in particular (warmup commonly
+  prevents the kind of early instability that would show up here as poor
+  high-LR performance), and real-world Muon usage is essentially always
+  paired with a decay schedule, so testing it constant-LR-only is a
+  departure from how it's normally deployed. Raised during review; not
+  addressed in this submission due to time, but a natural next step would
+  be one additional ablation (single cosine+warmup config, same LR grid)
+  rather than expanding the main grid, to avoid reopening the same
+  "which schedule is fair to all four" problem X% already ran into.
+- **500 training steps is short** relative to typical conventions for this
+  exact toy setup (e.g. nanoGPT's own char-level tiny-Shakespeare example
+  commonly trains several thousand steps). This means the core experiment's
+  ranking reflects early-training relative behavior, not asymptotic
+  quality — optimizers with fast early descent are structurally favored
+  over ones whose properties play out over a longer horizon. Not addressed
+  here due to time; a longer-training check on the top 2-3 LRs per
+  optimizer would be the natural follow-up.
+- **Muon is a simplified, from-scratch reproduction**, not a verbatim port
+  of the reference implementation — see `src/optimizers.py` docstring for
+  exactly what's simplified. **Nero was initially a much more meaningfully
+  different reimplementation** (missing mean-centering, wrong projection
+  target, sum-vs-mean second moment, spurious momentum on 1D params) until
+  corrected against the actual reference code (github.com/jxbz/nero) —
+  see `v0.5.0-nero-fix` tag. The corrected version's remaining
+  underperformance vs. AdamW is treated as a genuine finding, not
+  attributed to further unverified implementation differences.
 - **LAMB and full Modula/modular-norm were scoped out** of the optimizer
   comparison (see Optimizer candidates above) for time-budget reasons, not
   because they're less relevant.
-- **500 training steps is short.** Longer runs might change the ranking,
-  particularly for Nero (see discussion above).
 - Muon's per-parameter-group hybrid design (orthogonalized update for 2D
   hidden matrices, AdamW-style fallback for the rest) means its "LR" in the
   sweep only varies the Muon branch; the fallback-branch LR is held fixed
