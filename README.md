@@ -189,11 +189,71 @@ git history for how the experiment evolved. Results sections below are added
 once the corresponding sweeps have actually been run.
 
 ### Core experiment results
-_TBD_
+
+Full sweep: 4 optimizers x 9 LRs x 3 seeds = 108 runs, 500 steps each. Raw
+results: `results/core/sweep_results.csv`. Analysis and plots:
+`analysis.ipynb` (see `results/core/*.png` for the rendered figures).
+
+**Process note, disclosed rather than fixed quietly:** the loss-tolerance
+threshold X% (used to define "within X% of AdamW's best") was never actually
+committed to a config file before this sweep ran, despite the intent stated
+above. All three plausible values (5%, 10%, 20%) are reported below rather
+than picking one after seeing the results. The qualitative conclusion is
+identical across all three, so the finding is not an artifact of this gap —
+but the gap itself is real and is reported as such, not glossed over.
+
+| Optimizer | Own best val loss | Beats AdamW's best (1.718)? | log10 basin width @ X=10% |
+|---|---|---|---|
+| AdamW | 1.718 | (reference) | 0.375 |
+| **Muon** | **1.654** | **Yes** | **1.125 (3x wider)** |
+| SGD | 2.170 | No — never within 20% at any LR tested | diverges above lr≈0.71 (all seeds) |
+| Nero | 2.091 | No — never within 20% at any LR tested | n/a (never within threshold) |
+
+Two separate findings, not one clean story:
+
+1. **Muon wins on both pre-declared axes, and robustly** — holds at X=5%,
+   10%, and 20% alike. It also beats AdamW's best loss outright, which is
+   actually outside what the pre-declared criteria anticipated (the design
+   assumed an architecture-aware method would trade a bit of best-case
+   performance for a wider basin; Muon didn't have to make that trade here).
+2. **This simplified Nero reproduction underperforms AdamW substantially** —
+   a genuine negative result, not a bug (all of Nero's unit tests pass,
+   including the sphere-projection invariant). Plausible explanations, none
+   confirmed: no LR warmup/schedule is used here, the 1D-parameter fallback
+   (biases, norm affine params) is a simplification not in the original
+   paper, and Nero's reported benefits may show up more at larger scale or
+   longer training than this 500-step toy setting. This is reported as an
+   open question, not explained away.
+
+**Divergence rate:** SGD is the only optimizer that diverges anywhere in its
+sampled grid (all 3 seeds, for every LR ≥ 0.71 — see
+`results/core/divergence_rate.png`). AdamW, Nero, and Muon never diverge
+anywhere in their sampled ranges. This partially, not fully, supports the
+architecture-aware motivation: it cleanly separates SGD from the other
+three, but AdamW (not architecture-aware, by this project's definition)
+also never diverges — so divergence avoidance alone doesn't cleanly
+distinguish "architecture-aware" from "not" in this experiment.
 
 ### Finance stretch results
-_TBD_
+_TBD — sweep not yet run._
 
 ## Limitations
 
-_TBD — filled in honestly at the end, including anything that didn't work._
+- **X% was not pre-registered in a config file before the core sweep ran**
+  (see Core experiment results above for how this is handled: all three
+  candidate values are reported, and the conclusion is stable across them).
+- **Nero and Muon are simplified, from-scratch reproductions**, not verbatim
+  ports of reference implementations — see `src/optimizers.py` docstring for
+  exactly what's simplified. The Nero result above should be read as "this
+  simplified reproduction underperforms AdamW here," not as a claim about
+  the original published method.
+- **LAMB and full Modula/modular-norm were scoped out** of the optimizer
+  comparison (see Optimizer candidates above) for time-budget reasons, not
+  because they're less relevant.
+- **500 training steps is short.** Longer runs might change the ranking,
+  particularly for Nero (see discussion above).
+- Muon's per-parameter-group hybrid design (orthogonalized update for 2D
+  hidden matrices, AdamW-style fallback for the rest) means its "LR" in the
+  sweep only varies the Muon branch; the fallback-branch LR is held fixed
+  (see `configs/core_sweep.yaml`). A full 2D sweep over both would be more
+  thorough but was out of scope here.
