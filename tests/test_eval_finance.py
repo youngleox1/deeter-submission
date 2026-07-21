@@ -1,0 +1,59 @@
+import numpy as np
+import torch
+
+from src.eval_finance import evaluate_directional_metrics
+
+
+class _FakeTokenizer:
+    def __init__(self, bin_mean_return):
+        self.bin_mean_return = bin_mean_return
+
+
+class _FakeData:
+    """Returns a fixed, hand-picked (x, y) batch regardless of args, so the
+    expected accuracy/Brier numbers can be computed by hand.
+    """
+    def __init__(self, x, y, bin_mean_return):
+        self._x, self._y = x, y
+        self.tokenizer = _FakeTokenizer(bin_mean_return)
+
+    def get_batch(self, split, batch_size, seq_len, device="cpu"):
+        return self._x, self._y
+
+
+class _FakeModel:
+    """Always predicts a fixed bin via a near-one-hot logit vector."""
+    def __init__(self, always_predict_bin, vocab_size):
+        self.always_predict_bin = always_predict_bin
+        self.vocab_size = vocab_size
+
+    def eval(self):
+        pass
+
+    def __call__(self, x, y):
+        b, t = x.shape
+        logits = torch.full((b, t, self.vocab_size), -10.0)
+        logits[..., self.always_predict_bin] = 10.0
+        return logits, None
+
+
+def test_directional_accuracy_and_brier_hand_computed_case():
+    # bins 0,1 -> negative direction; bins 2,3 -> positive direction
+    bin_mean_return = np.array([-0.02, -0.01, 0.01, 0.02])
+    x = torch.tensor([[0, 2]])  # yesterday: neg, pos
+    y = torch.tensor([[2, 2]])  # today (actual): pos, pos
+
+    data = _FakeData(x, y, bin_mean_return)
+    model = _FakeModel(always_predict_bin=2, vocab_size=4)  # model always predicts "pos"
+
+    result = evaluate_directional_metrics(
+        model, data, batch_size=1, seq_len=2, n_eval_batches=1, device="cpu"
+    )
+
+    # naive (predict yesterday's direction): [neg vs pos -> wrong, pos vs pos -> correct] = 0.5
+    assert abs(result["naive_directional_accuracy"] - 0.5) < 1e-9
+    # model always predicts pos, actual is [pos, pos] -> both correct
+    assert result["model_directional_accuracy"] == 1.0
+    # model is near-certain and correct both times -> Brier near 0
+    assert result["brier_score"] < 0.01
+    assert result["n_predictions"] == 2
