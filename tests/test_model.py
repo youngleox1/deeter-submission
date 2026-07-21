@@ -70,3 +70,26 @@ def test_backward_pass_runs():
     grads = [p.grad for p in model.parameters() if p.requires_grad]
     assert all(g is not None for g in grads)
     assert all(torch.isfinite(g).all() for g in grads)
+
+
+def test_layernorm_affine_false_removes_ln_params_and_still_runs():
+    """Ablation switch for the Nero hypothesis: Nero's sphere projection
+    assumes a neuron's scale is irrelevant because downstream normalization
+    absorbs it -- which isn't quite true if that normalization layer has
+    its own learnable affine scale/shift. This just checks the switch
+    actually removes those params and the model still runs.
+    """
+    cfg = _tiny_cfg()
+    cfg.layernorm_affine = False
+    model = DecoderOnlyTransformer(cfg)
+
+    for module in model.modules():
+        if isinstance(module, torch.nn.LayerNorm):
+            assert module.weight is None
+            assert module.bias is None
+
+    idx = torch.randint(0, cfg.vocab_size, (2, cfg.max_seq_len))
+    targets = torch.randint(0, cfg.vocab_size, (2, cfg.max_seq_len))
+    _, loss = model(idx, targets)
+    assert torch.isfinite(loss)
+    loss.backward()

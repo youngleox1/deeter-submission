@@ -19,6 +19,7 @@ class ModelConfig:
     n_heads: int = 4
     mlp_ratio: int = 4
     dropout: float = 0.0
+    layernorm_affine: bool = True
 
 
 class CausalSelfAttention(nn.Module):
@@ -58,9 +59,9 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
-        self.ln1 = nn.LayerNorm(cfg.d_model)
+        self.ln1 = nn.LayerNorm(cfg.d_model, elementwise_affine=cfg.layernorm_affine)
         self.attn = CausalSelfAttention(cfg)
-        self.ln2 = nn.LayerNorm(cfg.d_model)
+        self.ln2 = nn.LayerNorm(cfg.d_model, elementwise_affine=cfg.layernorm_affine)
         self.mlp = MLP(cfg)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -84,7 +85,7 @@ class DecoderOnlyTransformer(nn.Module):
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.pos_emb = nn.Embedding(cfg.max_seq_len, cfg.d_model)
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layers)])
-        self.ln_f = nn.LayerNorm(cfg.d_model)
+        self.ln_f = nn.LayerNorm(cfg.d_model, elementwise_affine=cfg.layernorm_affine)
         self.head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
 
     def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
