@@ -1,5 +1,58 @@
 # Does architecture-aware optimization win a wider learning-rate basin?
 
+## TL;DR
+
+- **Question:** does an architecture-aware optimizer (Nero, Muon) trade a
+  bit of best-case loss for a *wider* range of learning rates that stay
+  near-optimal, compared to AdamW/SGD? Tested on a small decoder-only
+  transformer, on two domains: char-level text and discretized daily
+  equity returns.
+- **Core result (text):** **Muon wins outright** — best loss *and* a 3x
+  wider basin than AdamW, robust across three different tolerance
+  thresholds. **Nero underperforms** even after a from-scratch
+  reimplementation bug was caught and fixed against the reference code —
+  a genuine open question, not explained away. SGD is the only optimizer
+  that diverges anywhere in its sampled range.
+- **Finance stretch:** the neural pipeline finds ~no signal (near
+  uniform-baseline loss, no directional edge over a naive baseline) — but
+  a simple 5-lag logistic regression on the *same data* clearly does
+  (beats naive on all 6 tickers). So the honest conclusion isn't "market
+  efficiency," it's "this pipeline's 8-bin discretization + cross-entropy
+  objective fails to extract a signal that demonstrably exists." See
+  [Branches](#branches) — that finding lives on `finance-stretch`.
+- Full navigation: [Table of contents](#table-of-contents).
+
+## Table of contents
+
+- [Branches](#branches)
+- [Motivation](#motivation)
+- [Hypothesis](#hypothesis)
+- [Optimizer candidates](#optimizer-candidates)
+- [Success criteria](#success-criteria-declared-before-running-any-experiment)
+- [Data](#data)
+- [Repo layout](#repo-layout)
+- [How to run](#how-to-run)
+- [Results](#results)
+  - [Core experiment results](#core-experiment-results)
+  - [Ablation: LayerNorm affine params](#ablation-does-removing-layernorms-affine-params-help-nero)
+  - [Finance stretch results](#finance-stretch-results)
+- [Limitations](#limitations) *(folded)*
+- [References](#references) *(folded)*
+
+## Branches
+
+This repo uses three branches rather than one long-running one — each is a
+self-contained unit of work with its own commits/results/writeup:
+
+| Branch | Contents |
+|---|---|
+| [`master`](https://github.com/youngleox1/deeter-submission/tree/master) | Core text experiment (this README), the Nero rewrite, and the LayerNorm-affine ablation. |
+| [`finance-stretch`](https://github.com/youngleox1/deeter-submission/tree/finance-stretch) | The finance stretch experiment, plus the signal-investigation finding described in the TL;DR above. |
+| [`optimizer-extensions`](https://github.com/youngleox1/deeter-submission/tree/optimizer-extensions) | Exploring two more optimizer variants: LAMB, and a per-head Muon that orthogonalizes each attention head's weight sub-block independently. |
+
+Git tags (`v0.1.0-scaffold` through `v0.5.0-nero-fix`) mark milestones in
+`master`'s history — see `git tag -n` or the repo's Tags page.
+
 ## Motivation
 
 Optimal learning rate is known to shift with model size and architecture
@@ -78,10 +131,10 @@ than conflated with "does it also hold for a different architecture class."
 | Nero | Own prior work (ICML'21, "Learning by Turning") | Yes — neuron-wise normalized updates |
 | Muon | Current (2024-2025) architecture-aware method, orthogonalized momentum update, closely related in spirit to modular-norm | Yes — applied to 2D hidden-layer matrices |
 
-Scoped to four rather than including LAMB or a full Modula/modular-norm
-implementation — both are reasonable additions but carry more implementation
-risk than their marginal signal justifies in this time budget. Noted
-explicitly in Limitations as deliberate scope cuts, not oversights.
+Scoped to four on this branch — LAMB and a per-head Muon variant are explored
+on [`optimizer-extensions`](https://github.com/youngleox1/deeter-submission/tree/optimizer-extensions)
+instead of expanding this branch's grid; a full Modula/modular-norm
+implementation was scoped out entirely for time-budget reasons.
 
 ## Success criteria (declared before running any experiment)
 
@@ -98,12 +151,14 @@ across a fixed grid of learning rates:
 - The range of learning rates for which it stays within that same X% band is
   **at least 2x wider** (in log-LR space) than AdamW's corresponding band.
 
-**How basin width is actually computed** (`analysis.ipynb`, not just
-described in prose): for a given optimizer, take its own 9-point log-spaced
-LR grid, keep the subset of grid points whose mean-across-seeds best
-validation loss is `<= threshold` (where `threshold = AdamW's best loss x
-(1 + X)` — the same absolute threshold for every optimizer, anchored to
-AdamW), and report
+<details id="basin-width-computation">
+<summary><b>How basin width is actually computed</b> (click to expand — the exact formula and two caveats it implies)</summary>
+
+(`analysis.ipynb`, not just described in prose): for a given optimizer, take
+its own 9-point log-spaced LR grid, keep the subset of grid points whose
+mean-across-seeds best validation loss is `<= threshold` (where
+`threshold = AdamW's best loss x (1 + X)` — the same absolute threshold for
+every optimizer, anchored to AdamW), and report
 
 ```
 log10_basin_width = log10(max LR in that subset) - log10(min LR in that subset)
@@ -122,9 +177,12 @@ Two things worth being explicit about rather than leaving implicit:
   between two qualifying ones (a "hole" in the basin), this formula would
   silently report the full outer span rather than flagging the gap. In
   this project's actual data every qualifying set happens to be a
-  contiguous run (verified by inspection, not enforced in code) — but
-  that's a property of these particular loss curves being roughly
-  unimodal in LR, not a guarantee the method provides.
+  contiguous run — checked with a programmatic assertion in
+  `analysis.ipynb`, not just eyeballed — but that's a property of these
+  particular loss curves being roughly unimodal in LR, not a guarantee the
+  method provides.
+
+</details>
 
 **Divergence rate.** Fraction of (LR, seed) runs that diverge (NaN/Inf loss,
 or loss exceeding a fixed blowup threshold) at each LR. This is reported
@@ -156,50 +214,44 @@ No claim of trading edge, Sharpe ratio, or backtest performance is made — the
 model and task are deliberately simple, intended only to test whether the
 basin-width/divergence-rate findings transfer out of domain.
 
-## References
-
-- Kaplan, J. et al. "Scaling Laws for Neural Language Models." 2020.
-- Yang, G. & Hu, E. et al. "Tensor Programs V: Tuning Large Neural Networks
-  via Zero-Shot Hyperparameter Transfer." 2021.
-- Liu, Y., Bernstein, J., Meister, M., Yue, Y. "Learning by Turning: Neural
-  Architecture-Aware Optimisation." ICML 2021.
-- Large, T., Liu, Y. et al. "Scalable Optimization in the Modular Norm."
-  NeurIPS 2024.
-- Wortsman, M. et al. "Small-Scale Proxies for Large-Scale Transformer
-  Training Instabilities." 2023.
-- Jordan, K. et al. "Muon: An optimizer for hidden layers in neural
-  networks." 2024. (Technical report / blog, not peer-reviewed — noted as
-  such since it's a newer, less formally vetted method than the others
-  above.)
-- You, Y. et al. "Large Batch Optimization for Deep Learning: Training BERT
-  in 76 Minutes." ICLR 2020. (LAMB — related method, not included; see
-  Optimizer candidates above.)
-
 ## Data
 
-- Core: [TBD small public text corpus — filled in once chosen]
-- Finance: public daily OHLCV data pulled via the `yfinance` package for a
-  small, fixed list of liquid US equity tickers. This is external,
-  freely available market data; no proprietary or non-public data is used.
-  See `src/data/finance.py` for the exact fetch logic and ticker list.
+- **Core:** char-level [tiny-Shakespeare](https://github.com/karpathy/char-rnn)
+  corpus (public domain, ~1.1MB), vendored directly in this repo
+  (`src/data/tinyshakespeare.txt`) rather than fetched at runtime, so the
+  core experiment doesn't depend on network access to reproduce. See
+  `src/data/text.py`.
+- **Finance:** public daily OHLCV data pulled via the `yfinance` package for a
+  small, fixed list of liquid US equity tickers, over a fixed historical
+  window (not "most recent N days," so results don't shift if re-run
+  later). This is external, freely available market data; no proprietary or
+  non-public data is used. Cached CSVs are vendored in the repo for the same
+  offline-reproducibility reason as the text corpus. See `src/data/finance.py`
+  for the exact fetch logic and ticker list.
 
 ## Repo layout
 
 ```
 src/
-  model.py          small decoder-only transformer
-  optimizers.py     AdamW baseline + architecture-aware variants
-  train.py          single training run
-  sweep.py          LR x optimizer x seed grid driver
+  model.py            small decoder-only transformer
+  optimizers.py       AdamW/SGD baselines + Nero + Muon (from-scratch, checked against references)
+  train.py            single training run
+  sweep.py            LR x optimizer x seed grid driver
+  eval_finance.py     directional-accuracy / Brier-score eval (finance stretch)
   data/
-    text.py         core experiment data loader
-    finance.py       finance stretch data loader
-configs/            YAML configs for core and finance sweeps
-results/             sweep outputs (csv) and generated plots
-tests/               unit/smoke tests (see below)
-analysis.ipynb       generates all plots from results/*.csv
-scripts/run_all.sh   reproduce everything end to end
+    text.py           core experiment data loader (vendored corpus)
+    finance.py        finance stretch data loader (vendored cache + yfinance)
+configs/              core_sweep.yaml, finance_sweep.yaml, LayerNorm-affine ablation config
+results/              sweep outputs (csv) and generated plots
+tests/                unit/smoke tests (see How to run)
+analysis.ipynb        generates all core-experiment plots/tables from results/*.csv
+scripts/run_all.sh    reproduce core experiment + ablation end to end
 ```
+
+(Finance-specific files — `results/finance/`, `analysis_finance.ipynb`,
+`scripts/investigate_finance_signal.py` — live on the `finance-stretch`
+branch; `Lamb`/per-head `Muon` and their sweep config live on
+`optimizer-extensions`. See [Branches](#branches).)
 
 ## How to run
 
@@ -207,14 +259,12 @@ scripts/run_all.sh   reproduce everything end to end
 pip install -r requirements.txt
 pytest                          # run test suite
 python -m src.sweep --config configs/core_sweep.yaml
-python -m src.sweep --config configs/finance_sweep.yaml
+python -m src.sweep --config configs/ablation_nero_no_ln_affine.yaml
+# or, to do all of the above in one go:
+bash scripts/run_all.sh
 ```
 
-## Status
-
-This README is being filled in incrementally as the project progresses — see
-git history for how the experiment evolved. Results sections below are added
-once the corresponding sweeps have actually been run.
+## Results
 
 ### Core experiment results
 
@@ -303,11 +353,17 @@ tested-and-not-confirmed hypothesis with a genuine, unanticipated
 secondary finding, not retro-fitted into either story after the fact.
 
 ### Finance stretch results
-_TBD — sweep rerunning with corrected Nero; see `finance-stretch` branch
-for the in-progress writeup and a separate investigation into whether any
-learnable signal exists in this data at all._
 
-## Limitations
+Lives on the [`finance-stretch`](https://github.com/youngleox1/deeter-submission/tree/finance-stretch)
+branch, not this one — see its README for the full writeup. Headline
+(also in the [TL;DR](#tldr) above): the neural pipeline finds ~no
+directional signal, but a simple 5-lag logistic regression on the same
+data does — so the honest conclusion is a pipeline limitation
+(8-bin discretization + cross-entropy objective likely swamps a weak
+linear effect), not evidence of market efficiency.
+
+<details id="limitations">
+<summary><h2>Limitations (click to expand)</h2></summary>
 
 - **X% was not pre-registered in a config file before the core sweep ran**
   (see Core experiment results above for how this is handled: all three
@@ -354,11 +410,44 @@ learnable signal exists in this data at all._
   version's remaining underperformance vs. AdamW is treated as a genuine
   finding, not attributed to further unverified implementation
   differences.
-- **LAMB and full Modula/modular-norm were scoped out** of the optimizer
-  comparison (see Optimizer candidates above) for time-budget reasons, not
-  because they're less relevant.
+- **LAMB and full Modula/modular-norm were scoped out** of this branch's
+  optimizer comparison — LAMB and a per-head Muon variant are explored on
+  `optimizer-extensions` instead (see [Branches](#branches)); Modula was
+  scoped out entirely for time-budget reasons.
 - Muon's per-parameter-group hybrid design (orthogonalized update for 2D
   hidden matrices, AdamW-style fallback for the rest) means its "LR" in the
   sweep only varies the Muon branch; the fallback-branch LR is held fixed
   (see `configs/core_sweep.yaml`). A full 2D sweep over both would be more
   thorough but was out of scope here.
+- **The finance stretch's neural pipeline fails to extract signal that
+  demonstrably exists** in this exact data (see Finance stretch results
+  above, and the `finance-stretch` branch for the full writeup) — likely
+  because discretizing returns into 8 bins and optimizing full next-bin
+  cross-entropy is a much noisier objective than directly predicting
+  binary direction. Swapping in a direct binary classification head is the
+  natural fix; not attempted there due to time.
+
+</details>
+
+<details id="references">
+<summary><h2>References (click to expand)</h2></summary>
+
+- Kaplan, J. et al. "Scaling Laws for Neural Language Models." 2020.
+- Yang, G. & Hu, E. et al. "Tensor Programs V: Tuning Large Neural Networks
+  via Zero-Shot Hyperparameter Transfer." 2021.
+- Liu, Y., Bernstein, J., Meister, M., Yue, Y. "Learning by Turning: Neural
+  Architecture-Aware Optimisation." ICML 2021.
+- Large, T., Liu, Y. et al. "Scalable Optimization in the Modular Norm."
+  NeurIPS 2024.
+- Wortsman, M. et al. "Small-Scale Proxies for Large-Scale Transformer
+  Training Instabilities." 2023.
+- Jordan, K. et al. "Muon: An optimizer for hidden layers in neural
+  networks." 2024. (Technical report / blog, not peer-reviewed — noted as
+  such since it's a newer, less formally vetted method than the others
+  above; since incorporated into PyTorch core as `torch.optim.Muon` in
+  2.9, see Limitations.)
+- You, Y. et al. "Large Batch Optimization for Deep Learning: Training BERT
+  in 76 Minutes." ICLR 2020. (LAMB — implemented on `optimizer-extensions`,
+  see Branches above.)
+
+</details>
