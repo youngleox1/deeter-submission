@@ -1,0 +1,36 @@
+======================================================================
+1. Autocorrelation of daily log returns, lags 1-5
+======================================================================
+SPY    (n=2515, 95% band=+/-0.0391): -0.1161*  +0.0655*  -0.0126   -0.0589*  +0.0412*
+AAPL   (n=2515, 95% band=+/-0.0391): -0.0662*  -0.0063   -0.0210   -0.0056   +0.0335 
+MSFT   (n=2515, 95% band=+/-0.0391): -0.1382*  -0.0057   +0.0013   -0.0234   +0.0132 
+GOOGL  (n=2515, 95% band=+/-0.0391): -0.0424*  -0.0113   -0.0283   -0.0177   -0.0108 
+AMZN   (n=2515, 95% band=+/-0.0391): -0.0108   -0.0062   -0.0218   +0.0146   +0.0034 
+JPM    (n=2515, 95% band=+/-0.0391): -0.0987*  +0.0756*  -0.0152   -0.0813*  +0.0541*
+
+Pooled (all tickers concatenated):
+-0.0691*  +0.0122   -0.0166*  -0.0219*  +0.0186*  (95% band=+/-0.0160)
+
+======================================================================
+2. Ljung-Box test (joint significance of lags 1-5 autocorrelation)
+======================================================================
+SPY   : LB stat=58.049  p-value=0.0000
+AAPL  : LB stat=15.116  p-value=0.0099
+MSFT  : LB stat=49.978  p-value=0.0000
+GOOGL : LB stat=7.934  p-value=0.1599
+AMZN  : LB stat=2.154  p-value=0.8275
+JPM   : LB stat=63.414  p-value=0.0000
+pooled: LB stat=90.819  p-value=0.0000
+
+======================================================================
+3. Simple logistic regression: predict sign(return_t) from lags 1-5
+   Time-ordered 85/15 split per ticker (same split logic as FinanceReturns)
+======================================================================
+SPY   : train_acc=0.5406  test_acc=0.5782  naive_test_acc=0.5358  test_beats_naive=YES
+AAPL  : train_acc=0.5274  test_acc=0.5597  naive_test_acc=0.5279  test_beats_naive=YES
+MSFT  : train_acc=0.5316  test_acc=0.5544  naive_test_acc=0.5119  test_beats_naive=YES
+GOOGL : train_acc=0.5312  test_acc=0.5782  naive_test_acc=0.5146  test_beats_naive=YES
+AMZN  : train_acc=0.5363  test_acc=0.5279  naive_test_acc=0.5013  test_beats_naive=YES
+JPM   : train_acc=0.5101  test_acc=0.5862  naive_test_acc=0.5279  test_beats_naive=YES
+
+Mean across tickers: train=0.5295  test=0.5641  naive=0.5199
