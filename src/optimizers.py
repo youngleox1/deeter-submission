@@ -60,6 +60,41 @@ what changed and why.
   ordered [head] x [within-head], so it's split into `n_heads` equal
   column-chunks. Newton-Schulz runs independently on each chunk. MLP
   weights have no head structure and use whole-matrix Muon unchanged.
+
+- Modula (Large, Liu et al., "Scalable Optimization in the Modular Norm,"
+  NeurIPS 2024 -- this repo's own author is a co-author): verified against
+  the paper text directly (Appendix A.2/A.3, Table 2), not memory, since
+  it's easy to conflate with Muon. The paper's actual prescription is
+  DIFFERENT from Muon's Newton-Schulz orthogonalization: it normalizes a
+  hidden-layer weight update by an estimate of its SPECTRAL NORM (largest
+  singular value only, via 2 steps of online power iteration warm-started
+  from the previous step's estimate), not by flattening the whole singular
+  value spectrum to ~1. This preserves the update's relative singular-value
+  shape -- only the top singular value is capped to ~1, rather than every
+  singular value -- which is the precise sense in which it's "very closely
+  related to Muon" but not the same operation. Shape factor is
+  sqrt(dout/din) exactly (Table 2's Linear atom), with no clamp at 1 --
+  unlike this repo's Muon, which clamps via max(1, dout/din). Same hybrid
+  param-group design as Muon (2D hidden matrices get this treatment; the
+  rest fall back to plain AdamW).
+
+- Mass-based automatic per-module LR allocation (same paper, Section 3.3):
+  a SEPARATE, orthogonal mechanism from the update rule above -- combinable
+  with any base optimizer, tested here with AdamW as the base (matching the
+  paper's own primary experiments). Assigns each of {input embeddings,
+  hidden transformer blocks, output head} a "mass," then scales each
+  parameter's effective LR by (its mass / total mass across the network).
+  Default 1:1:1 (no reweighting); the paper itself found other ratios
+  (e.g. 0.5x on hidden mass) worked better for their ResMLP/CIFAR-10 setup,
+  but that hasn't been retuned for this project's architecture -- exposed
+  as a parameter to explore, not tuned here. Within the hidden-block total
+  mass, every hidden weight tensor (qkv/proj/fc1/fc2 x L blocks) gets an
+  equal share, matching the paper's "tare" operation (Definition 7):
+  starting from unit mass per atom, then rescaling the whole stack
+  proportionally to hit the target total. Biases and LayerNorm affine
+  params (if enabled) are outside this scheme entirely (left at the base
+  LR, unscaled) -- a scope simplification, noted rather than silently
+  assumed away.
 """
 from typing import Iterable
 
@@ -110,6 +145,30 @@ def zeropower_per_head(G: torch.Tensor, n_heads: int, steps: int = 5,
         for h in range(n_heads)
     ])
     return out.reshape(G.shape)
+
+
+def spectral_norm_power_iteration(M: torch.Tensor, u: torch.Tensor, steps: int = 2,
+                                   eps: float = 1e-12) -> tuple:
+    """Estimate the top singular value (spectral norm) of 2D matrix M via
+    online power iteration, warm-started from a previous estimate `u` of
+    the top LEFT singular vector -- matches Large, Liu et al. NeurIPS'24
+    Appendix A.3 exactly: "storing a running estimate of the top singular
+    vector u ... each time we normalize a weight update, the previous
+    update's estimated singular vector is used as the starting value ...
+    just two steps of power iteration per weight update."
+
+    Returns (sigma_estimate, updated_u) -- sigma is a 0-dim tensor,
+    updated_u has the same shape as the input u (to warm-start next call).
+    """
+    assert M.dim() == 2
+    v = None
+    for _ in range(steps):
+        v = M.T @ u
+        v = v / v.norm().clamp_min(eps)
+        Mv = M @ v
+        sigma = Mv.norm().clamp_min(eps)
+        u = Mv / sigma
+    return sigma, u
 
 
 def _neuron_norm(x: torch.Tensor) -> torch.Tensor:
@@ -275,6 +334,62 @@ class Lamb(Optimizer):
         return loss
 
 
+class Modula(Optimizer):
+    """Param groups must set `use_modula=True` (2D hidden-layer matrices,
+    same split as this repo's Muon -- see _modula_param_groups) or
+    `use_modula=False` (everything else, AdamW-style fallback).
+    """
+
+    def __init__(self, params: Iterable[dict], lr: float = 0.02, momentum: float = 0.95,
+                 power_iters: int = 2, adamw_lr: float = 1e-3,
+                 adamw_betas: tuple = (0.9, 0.95), adamw_eps: float = 1e-8):
+        defaults = dict(lr=lr, momentum=momentum, power_iters=power_iters,
+                         adamw_lr=adamw_lr, adamw_betas=adamw_betas, adamw_eps=adamw_eps)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = closure() if closure is not None else None
+        for group in self.param_groups:
+            use_modula = group.get("use_modula", None)
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                g = p.grad
+                state = self.state[p]
+                is_modula_param = use_modula if use_modula is not None else (p.dim() == 2)
+
+                if is_modula_param:
+                    if "momentum_buf" not in state:
+                        state["momentum_buf"] = torch.zeros_like(p)
+                        u0 = torch.randn(p.size(0), device=p.device, dtype=p.dtype)
+                        state["u"] = u0 / u0.norm().clamp_min(1e-12)
+                    buf = state["momentum_buf"]
+                    buf.mul_(group["momentum"]).add_(g)
+
+                    sigma, u = spectral_norm_power_iteration(buf, state["u"], steps=group["power_iters"])
+                    state["u"] = u
+
+                    update = buf / sigma
+                    shape_scale = (p.size(0) / p.size(1)) ** 0.5  # sqrt(dout/din), NOT clamped -- matches Modula's Table 2 exactly
+                    p.add_(update, alpha=-group["lr"] * shape_scale)
+                else:
+                    if "step" not in state:
+                        state["step"] = 0
+                        state["exp_avg"] = torch.zeros_like(p)
+                        state["exp_avg_sq"] = torch.zeros_like(p)
+                    state["step"] += 1
+                    beta1, beta2 = group["adamw_betas"]
+                    state["exp_avg"].mul_(beta1).add_(g, alpha=1 - beta1)
+                    state["exp_avg_sq"].mul_(beta2).addcmul_(g, g, value=1 - beta2)
+                    bc1 = 1 - beta1 ** state["step"]
+                    bc2 = 1 - beta2 ** state["step"]
+                    denom = (state["exp_avg_sq"] / bc2).sqrt().add_(group["adamw_eps"])
+                    step_size = group["adamw_lr"] / bc1
+                    p.sub_(step_size * state["exp_avg"] / denom)
+        return loss
+
+
 def _muon_param_groups(model: torch.nn.Module, lr: float, adamw_lr: float) -> list[dict]:
     """Split params the way the Muon reference design expects: 2D weight
     matrices inside transformer blocks (attention/MLP) go through the
@@ -323,6 +438,74 @@ def _muon_per_head_param_groups(model: torch.nn.Module, lr: float, adamw_lr: flo
     ]
 
 
+def _modula_param_groups(model: torch.nn.Module, lr: float, adamw_lr: float) -> list[dict]:
+    """Same 2D-hidden-matrix-vs-everything-else split as _muon_param_groups
+    (see that function's docstring) -- Modula's spectral-norm treatment is
+    only meaningful for Linear-like hidden matrices (Table 2), not
+    embeddings (which have their own, unimplemented-here, max-row-norm
+    rule) or 1D params.
+    """
+    hidden_matrices, other_params = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.dim() == 2 and "blocks" in name:
+            hidden_matrices.append(p)
+        else:
+            other_params.append(p)
+    return [
+        {"params": hidden_matrices, "use_modula": True, "lr": lr},
+        {"params": other_params, "use_modula": False, "lr": lr, "adamw_lr": adamw_lr},
+    ]
+
+
+def mass_scaled_param_groups(model: torch.nn.Module, base_lr: float,
+                              input_mass: float = 1.0, hidden_mass: float = 1.0,
+                              output_mass: float = 1.0, **adamw_kwargs) -> list[dict]:
+    """Mass-based automatic per-module LR allocation (Large, Liu et al.
+    NeurIPS'24, Section 3.3) -- an orthogonal mechanism from Modula's
+    update-rule change above, combinable with any base optimizer. Here
+    combined with AdamW, matching the paper's own primary experiments.
+
+    Assigns input embeddings, the hidden transformer blocks (as one
+    stack), and the output head each a mass, then scales every
+    parameter's effective LR by (its mass / total mass across the
+    network). Within the hidden stack, mass is split evenly across every
+    hidden weight tensor (qkv/proj/fc1/fc2 x L blocks) -- matching the
+    paper's "tare" operation (Definition 7): start from unit mass per
+    atom, then rescale the whole stack proportionally to hit the target
+    total. Biases and LayerNorm affine params (if enabled) are outside
+    this scheme -- left at base_lr, unscaled -- a scope simplification,
+    not silently assumed away.
+
+    Default masses are 1:1:1 (no reweighting). The paper's own ResMLP/
+    CIFAR-10 experiments found other ratios (e.g. hidden_mass=0.5) worked
+    better; that hasn't been retuned for this project's architecture.
+    """
+    hidden_names = [name for name, p in model.named_parameters()
+                     if p.dim() == 2 and "blocks" in name]
+    n_hidden = len(hidden_names)
+    mass_per_hidden_tensor = hidden_mass / n_hidden if n_hidden > 0 else 0.0
+    total_mass = input_mass + hidden_mass + output_mass
+
+    groups = []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if "tok_emb" in name or "pos_emb" in name:
+            mass = input_mass
+        elif name in hidden_names:
+            mass = mass_per_hidden_tensor
+        elif "head" in name:
+            mass = output_mass
+        else:
+            mass = None  # biases / norm affine params: outside the mass scheme, unscaled
+
+        lr = base_lr * (mass / total_mass) if mass is not None else base_lr
+        groups.append({"params": [p], "lr": lr})
+    return groups
+
+
 def build_optimizer(name: str, model: torch.nn.Module, lr: float, **kwargs) -> Optimizer:
     name = name.lower()
     if name == "adamw":
@@ -344,4 +527,17 @@ def build_optimizer(name: str, model: torch.nn.Module, lr: float, **kwargs) -> O
     if name == "lamb":
         return Lamb(model.parameters(), lr=lr, betas=kwargs.get("betas", (0.9, 0.999)),
                     eps=kwargs.get("eps", 1e-6), weight_decay=kwargs.get("weight_decay", 0.0))
+    if name == "modula":
+        groups = _modula_param_groups(model, lr=lr, adamw_lr=kwargs.get("adamw_lr", lr))
+        return Modula(groups, lr=lr, momentum=kwargs.get("momentum", 0.95),
+                      power_iters=kwargs.get("power_iters", 2))
+    if name == "adamw_mass_alloc":
+        groups = mass_scaled_param_groups(
+            model, base_lr=lr,
+            input_mass=kwargs.get("input_mass", 1.0),
+            hidden_mass=kwargs.get("hidden_mass", 1.0),
+            output_mass=kwargs.get("output_mass", 1.0),
+        )
+        return torch.optim.AdamW(groups, betas=kwargs.get("betas", (0.9, 0.95)),
+                                  weight_decay=kwargs.get("weight_decay", 0.0))
     raise ValueError(f"unknown optimizer: {name}")

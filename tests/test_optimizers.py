@@ -5,6 +5,8 @@ from src.optimizers import (
     Lamb,
     Nero,
     build_optimizer,
+    mass_scaled_param_groups,
+    spectral_norm_power_iteration,
     zeropower_per_head,
     zeropower_via_newtonschulz,
 )
@@ -139,7 +141,8 @@ def test_all_optimizers_decrease_loss_on_tiny_model():
     idx, targets = _tiny_batch(cfg)
 
     for name, lr in [("adamw", 3e-3), ("sgd", 1e-2), ("nero", 1e-2), ("muon", 2e-2),
-                     ("lamb", 3e-3), ("muon_per_head", 2e-2)]:
+                     ("lamb", 3e-3), ("muon_per_head", 2e-2),
+                     ("modula", 2e-2), ("adamw_mass_alloc", 3e-3)]:
         torch.manual_seed(1)
         model = DecoderOnlyTransformer(cfg)
         opt = build_optimizer(name, model, lr=lr)
@@ -248,3 +251,113 @@ def test_muon_per_head_param_groups_shapes():
         assert p.size(0) % (3 * cfg.n_heads) == 0
     for p in proj_group["params"]:
         assert p.size(1) % cfg.n_heads == 0
+
+
+def test_spectral_norm_power_iteration_matches_true_top_singular_value():
+    torch.manual_seed(0)
+    M = torch.randn(20, 15)
+    true_sigma_max = torch.linalg.svdvals(M).max()
+
+    u = torch.randn(20)
+    u = u / u.norm()
+    # run several calls in sequence (warm-starting u each time), like actual usage
+    for _ in range(10):
+        sigma, u = spectral_norm_power_iteration(M, u, steps=2)
+
+    assert abs(sigma.item() - true_sigma_max.item()) < 1e-2 * true_sigma_max.item()
+
+
+def test_modula_update_caps_top_singular_value_but_preserves_spectrum_shape():
+    """The defining property that distinguishes Modula's update rule from
+    Muon's: only the TOP singular value gets capped to ~1, the relative
+    shape of the rest of the spectrum is preserved (unlike Newton-Schulz,
+    which flattens every singular value toward ~1).
+    """
+    torch.manual_seed(0)
+    M = torch.randn(10, 6)
+    input_svals = torch.linalg.svdvals(M)
+
+    u = torch.randn(10)
+    u = u / u.norm()
+    sigma, _ = spectral_norm_power_iteration(M, u, steps=10)
+    update = M / sigma
+
+    output_svals = torch.linalg.svdvals(update)
+    # top singular value capped to ~1
+    assert abs(output_svals.max().item() - 1.0) < 0.05
+    # but the RATIO between top and bottom singular values is unchanged
+    # (Newton-Schulz would NOT preserve this ratio -- it flattens the spectrum)
+    input_ratio = (input_svals.max() / input_svals.min()).item()
+    output_ratio = (output_svals.max() / output_svals.min()).item()
+    assert abs(input_ratio - output_ratio) / input_ratio < 0.05
+
+
+def test_modula_param_groups_matches_muon_split():
+    cfg = _tiny_cfg()
+    model = DecoderOnlyTransformer(cfg)
+    opt = build_optimizer("modula", model, lr=0.02)
+
+    modula_group = next(g for g in opt.param_groups if g["use_modula"])
+    other_group = next(g for g in opt.param_groups if not g["use_modula"])
+
+    assert all(p.dim() == 2 for p in modula_group["params"])
+    assert len(modula_group["params"]) > 0
+    assert len(other_group["params"]) > 0
+    excluded = {model.tok_emb.weight, model.pos_emb.weight, model.head.weight}
+    modula_param_ids = {id(p) for p in modula_group["params"]}
+    assert all(id(p) not in modula_param_ids for p in excluded)
+
+
+def _n_hidden_tensors(model) -> int:
+    return sum(1 for name, p in model.named_parameters() if p.dim() == 2 and "blocks" in name)
+
+
+def test_mass_scaled_param_groups_default_equal_masses_give_equal_fractions():
+    cfg = _tiny_cfg()
+    model = DecoderOnlyTransformer(cfg)
+    base_lr = 0.003
+    n_hidden = _n_hidden_tensors(model)
+    groups = mass_scaled_param_groups(model, base_lr=base_lr,
+                                       input_mass=1.0, hidden_mass=1.0, output_mass=1.0)
+
+    lr_by_param_id = {id(p): g["lr"] for g in groups for p in g["params"]}
+    # default 1:1:1 -> input/output each get base_lr/3; each hidden tensor
+    # gets its equal share of the hidden third: base_lr * (1/n_hidden) / 3
+    assert abs(lr_by_param_id[id(model.tok_emb.weight)] - base_lr / 3) < 1e-9
+    assert abs(lr_by_param_id[id(model.head.weight)] - base_lr / 3) < 1e-9
+    hidden_lr = lr_by_param_id[id(model.blocks[0].attn.qkv.weight)]
+    assert abs(hidden_lr - base_lr * (1 / n_hidden) / 3) < 1e-9
+
+
+def test_mass_scaled_param_groups_doubling_hidden_mass_doubles_hidden_lr_share():
+    cfg = _tiny_cfg()
+    model = DecoderOnlyTransformer(cfg)
+    base_lr = 0.003
+    n_hidden = _n_hidden_tensors(model)
+
+    groups_1x = mass_scaled_param_groups(model, base_lr=base_lr,
+                                          input_mass=1.0, hidden_mass=1.0, output_mass=1.0)
+    groups_2x = mass_scaled_param_groups(model, base_lr=base_lr,
+                                          input_mass=1.0, hidden_mass=2.0, output_mass=1.0)
+
+    def hidden_lr(groups):
+        by_id = {id(p): g["lr"] for g in groups for p in g["params"]}
+        return by_id[id(model.blocks[0].attn.qkv.weight)]
+
+    # hidden_mass=1, total=3 -> per-tensor lr = base_lr * (1/n_hidden) / 3
+    # hidden_mass=2, total=4 -> per-tensor lr = base_lr * (2/n_hidden) / 4
+    assert abs(hidden_lr(groups_1x) - base_lr * (1 / n_hidden) / 3) < 1e-9
+    assert abs(hidden_lr(groups_2x) - base_lr * (2 / n_hidden) / 4) < 1e-9
+
+
+def test_mass_scaled_param_groups_norm_bias_params_left_at_base_lr():
+    cfg = _tiny_cfg()
+    cfg.layernorm_affine = True
+    model = DecoderOnlyTransformer(cfg)
+    base_lr = 0.003
+    groups = mass_scaled_param_groups(model, base_lr=base_lr,
+                                       input_mass=1.0, hidden_mass=1.0, output_mass=1.0)
+
+    lr_by_param_id = {id(p): g["lr"] for g in groups for p in g["params"]}
+    ln_weight_lr = lr_by_param_id[id(model.blocks[0].ln1.weight)]
+    assert ln_weight_lr == base_lr  # untouched by the mass scheme
