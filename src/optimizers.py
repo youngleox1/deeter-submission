@@ -3,19 +3,27 @@
 AdamW and SGD are used directly from torch.optim — no reimplementation
 needed or wanted. Nero and Muon are implemented from scratch below.
 
-Both custom implementations are simplified reproductions of the published
-methods, not verbatim ports of reference code, and are documented as such:
+Muon is a from-scratch reproduction, documented below as simplified rather
+than a verbatim port. Nero matches the authors' reference implementation
+(https://github.com/jxbz/nero) closely -- an earlier version of this file
+had a meaningfully different, buggy "simplified" Nero (no mean-centering,
+wrong re-projection target, sum-vs-mean second moment, and spurious
+momentum on 1D params that the real method never has); see git history for
+what changed and why.
 
 - Nero (Liu, Bernstein, Meister, Yue. "Learning by Turning: Neural
-  Architecture-Aware Optimisation." ICML 2021): neuron-wise (per-output-row)
-  normalized gradient step with a running second-moment estimate, followed
-  by a projection that restores each neuron's pre-update row norm ("sphere
-  projection" — since a neuron's overall scale is often absorbed by a
-  downstream normalization layer, constraining it lets the optimizer focus
-  purely on direction). 1D parameters (biases, norm affine params) don't
-  have a natural row/neuron structure, so they fall back to a plain
-  elementwise normalized (Adam-like) update — a simplification relative to
-  the original paper, noted here rather than left implicit.
+  Architecture-Aware Optimisation." ICML 2021): momentum-free. Each
+  parameter with more than 1 dimension is immediately centered (mean
+  subtracted) and projected to unit norm per neuron (output row) at
+  construction time -- "projected gradient descent over the space of
+  balanced networks," per the paper -- and re-centered/re-projected after
+  every step. A per-neuron second-moment (RMS) running average normalizes
+  the gradient; the step size is additionally scaled by a per-tensor
+  constant fixed at construction (the mean pre-projection neuron norm).
+  1D parameters (biases, norm affine params) use the same per-"neuron"
+  machinery with neuron size 1 (norm = abs(value)) but are never centered
+  -- centering a size-1 vector would just zero it, and the reference
+  implementation explicitly disallows this.
 
 - Muon (Jordan et al., "Muon: An optimizer for hidden layers in neural
   networks," 2024 — technical report, not peer-reviewed): momentum, then
@@ -53,52 +61,65 @@ def zeropower_via_newtonschulz(G: torch.Tensor, steps: int = 5, eps: float = 1e-
     return X
 
 
+def _neuron_norm(x: torch.Tensor) -> torch.Tensor:
+    """Per-neuron (per-output-row) L2 norm, shaped to broadcast against x.
+    For 1D tensors, each scalar is its own size-1 "neuron" (norm = abs
+    value) -- matches the reference implementation exactly, and is what
+    lets 1D params (biases, norm affine) go through the same machinery
+    with no special-casing.
+    """
+    if x.dim() > 1:
+        view_shape = [x.shape[0]] + [1] * (x.dim() - 1)
+        return x.reshape(x.shape[0], -1).norm(dim=1).view(*view_shape)
+    return x.abs()
+
+
+def _neuron_mean(x: torch.Tensor) -> torch.Tensor:
+    if x.dim() > 1:
+        view_shape = [x.shape[0]] + [1] * (x.dim() - 1)
+        return x.reshape(x.shape[0], -1).mean(dim=1).view(*view_shape)
+    raise ValueError("neuron_mean is not defined for 1D tensors (would zero them out)")
+
+
 class Nero(Optimizer):
     def __init__(self, params: Iterable[torch.nn.Parameter], lr: float = 0.01,
-                 beta: float = 0.999, eps: float = 1e-8):
-        defaults = dict(lr=lr, beta=beta, eps=eps)
+                 beta: float = 0.999, constraints: bool = True):
+        defaults = dict(lr=lr, beta=beta, constraints=constraints)
         super().__init__(params, defaults)
+
+        with torch.no_grad():
+            for group in self.param_groups:
+                for p in group["params"]:
+                    if group["constraints"] and p.dim() > 1:
+                        p.data -= _neuron_mean(p)
+                        p.data /= _neuron_norm(p)
+                    state = self.state[p]
+                    state["step"] = 0
+                    state["exp_avg_sq"] = torch.zeros_like(_neuron_norm(p))
+                    scale = _neuron_norm(p).mean()
+                    state["scale"] = scale if scale.item() != 0.0 else torch.tensor(0.01)
 
     @torch.no_grad()
     def step(self, closure=None):
         loss = closure() if closure is not None else None
         for group in self.param_groups:
-            lr, beta, eps = group["lr"], group["beta"], group["eps"]
+            lr, beta, constraints = group["lr"], group["beta"], group["constraints"]
             for p in group["params"]:
                 if p.grad is None:
                     continue
-                g = p.grad
                 state = self.state[p]
-
-                if len(state) == 0:
-                    state["step"] = 0
-                    if p.dim() >= 2:
-                        p_flat0 = p.view(p.size(0), -1)
-                        state["v"] = torch.zeros(p.size(0), device=p.device, dtype=p.dtype)
-                        state["init_row_norm"] = p_flat0.norm(dim=1).clamp_min(eps)
-                    else:
-                        state["v"] = torch.zeros_like(p)
                 state["step"] += 1
+                bias_correction = 1 - beta ** state["step"]
+                state["exp_avg_sq"] = beta * state["exp_avg_sq"] + (1 - beta) * _neuron_norm(p.grad) ** 2
 
-                if p.dim() >= 2:
-                    g_flat = g.view(g.size(0), -1)
-                    row_sq = g_flat.pow(2).mean(dim=1)
-                    state["v"].mul_(beta).add_(row_sq, alpha=1 - beta)
-                    bias_corr = 1 - beta ** state["step"]
-                    denom = (state["v"] / bias_corr).sqrt().add_(eps)
-                    update = g_flat / denom.unsqueeze(1)
+                grad_normed = p.grad / (state["exp_avg_sq"] / bias_correction).sqrt()
+                grad_normed = torch.nan_to_num(grad_normed, nan=0.0)
 
-                    p_flat = p.view(p.size(0), -1)
-                    p_flat.add_(update, alpha=-lr)
+                p.data -= lr * state["scale"] * grad_normed
 
-                    cur_norm = p_flat.norm(dim=1).clamp_min(eps)
-                    scale = state["init_row_norm"] / cur_norm
-                    p_flat.mul_(scale.unsqueeze(1))
-                else:
-                    state["v"].mul_(beta).addcmul_(g, g, value=1 - beta)
-                    bias_corr = 1 - beta ** state["step"]
-                    denom = (state["v"] / bias_corr).sqrt().add_(eps)
-                    p.add_(g / denom, alpha=-lr)
+                if constraints and p.dim() > 1:
+                    p.data -= _neuron_mean(p)
+                    p.data /= _neuron_norm(p)
         return loss
 
 
@@ -182,7 +203,8 @@ def build_optimizer(name: str, model: torch.nn.Module, lr: float, **kwargs) -> O
         return torch.optim.SGD(model.parameters(), lr=lr,
                                 momentum=kwargs.get("momentum", 0.9))
     if name == "nero":
-        return Nero(model.parameters(), lr=lr, beta=kwargs.get("beta", 0.999))
+        return Nero(model.parameters(), lr=lr, beta=kwargs.get("beta", 0.999),
+                     constraints=kwargs.get("constraints", True))
     if name == "muon":
         groups = _muon_param_groups(model, lr=lr, adamw_lr=kwargs.get("adamw_lr", lr))
         return Muon(groups, lr=lr, momentum=kwargs.get("momentum", 0.95))

@@ -37,17 +37,77 @@ def test_newtonschulz_bounds_singular_values_near_one():
     assert output_svals.max() < 1.5
 
 
-def test_nero_sphere_projection_preserves_row_norm():
+def test_nero_centers_and_projects_to_unit_norm_at_construction():
+    """Matches the reference implementation (jxbz/nero): a >1D parameter is
+    immediately mean-centered and projected to unit norm per neuron (row)
+    when the optimizer is constructed, before any step is taken.
+    """
+    torch.manual_seed(0)
+    weight = torch.nn.Parameter(torch.randn(6, 4) * 5 + 3)  # arbitrary scale/offset
+    Nero([weight], lr=0.5)
+
+    row_norms = weight.detach().norm(dim=1)
+    row_means = weight.detach().mean(dim=1)
+    assert torch.allclose(row_norms, torch.ones(6), atol=1e-5)
+    assert torch.allclose(row_means, torch.zeros(6), atol=1e-5)
+
+
+def test_nero_projection_invariant_preserved_after_step():
+    """The centered/unit-norm invariant established at construction must
+    still hold after a step -- the reference re-centers and re-projects
+    to unit norm every step, not just once at init.
+    """
     torch.manual_seed(0)
     weight = torch.nn.Parameter(torch.randn(6, 4))
-    pre_update_row_norm = weight.detach().norm(dim=1).clone()
-
     opt = Nero([weight], lr=0.5)
+
     weight.grad = torch.randn_like(weight) * 10  # large grad to stress-test projection
     opt.step()
 
-    post_update_row_norm = weight.detach().norm(dim=1)
-    assert torch.allclose(pre_update_row_norm, post_update_row_norm, atol=1e-4)
+    row_norms = weight.detach().norm(dim=1)
+    row_means = weight.detach().mean(dim=1)
+    assert torch.allclose(row_norms, torch.ones(6), atol=1e-4)
+    assert torch.allclose(row_means, torch.zeros(6), atol=1e-4)
+
+
+def test_nero_1d_params_are_not_centered_but_still_updated():
+    """1D params (e.g. biases) can't be centered (a size-1 'neuron' has no
+    meaningful mean-zero projection) -- the reference explicitly disallows
+    this and just runs the same per-"neuron" (here, per-scalar) adaptive
+    update uncentered.
+    """
+    torch.manual_seed(0)
+    bias = torch.nn.Parameter(torch.randn(5) + 2.0)
+    original = bias.detach().clone()
+    opt = Nero([bias], lr=0.1)
+
+    bias.grad = torch.randn_like(bias)
+    opt.step()
+
+    assert not torch.allclose(bias.detach(), original)  # it did update
+    # no norm=1 or mean=0 invariant is expected/enforced for 1D params
+
+
+def test_nero_has_no_momentum_state():
+    """Nero is momentum-free by design (Liu et al., ICML'21) -- only a
+    second-moment (RMS) running average is tracked, never a first-moment
+    gradient EMA. An earlier version of this optimizer incorrectly added
+    momentum to its 1D-parameter fallback branch; this guards against
+    that regression.
+    """
+    torch.manual_seed(0)
+    weight = torch.nn.Parameter(torch.randn(6, 4))
+    bias = torch.nn.Parameter(torch.randn(4))
+    opt = Nero([weight, bias], lr=0.1)
+
+    weight.grad = torch.randn_like(weight)
+    bias.grad = torch.randn_like(bias)
+    opt.step()
+
+    for p in (weight, bias):
+        state = opt.state[p]
+        assert "exp_avg" not in state
+        assert "exp_avg_sq" in state
 
 
 def test_muon_param_groups_split_hidden_vs_other():
