@@ -1,7 +1,13 @@
 import torch
 
 from src.model import DecoderOnlyTransformer, ModelConfig
-from src.optimizers import Nero, build_optimizer, zeropower_via_newtonschulz
+from src.optimizers import (
+    Lamb,
+    Nero,
+    build_optimizer,
+    zeropower_per_head,
+    zeropower_via_newtonschulz,
+)
 
 
 def _tiny_cfg() -> ModelConfig:
@@ -132,7 +138,8 @@ def test_all_optimizers_decrease_loss_on_tiny_model():
     torch.manual_seed(0)
     idx, targets = _tiny_batch(cfg)
 
-    for name, lr in [("adamw", 3e-3), ("sgd", 1e-2), ("nero", 1e-2), ("muon", 2e-2)]:
+    for name, lr in [("adamw", 3e-3), ("sgd", 1e-2), ("nero", 1e-2), ("muon", 2e-2),
+                     ("lamb", 3e-3), ("muon_per_head", 2e-2)]:
         torch.manual_seed(1)
         model = DecoderOnlyTransformer(cfg)
         opt = build_optimizer(name, model, lr=lr)
@@ -147,3 +154,97 @@ def test_all_optimizers_decrease_loss_on_tiny_model():
 
         assert torch.isfinite(final_loss), f"{name} diverged"
         assert final_loss.item() < initial_loss.item(), f"{name} did not reduce loss"
+
+
+def test_lamb_trust_ratio_defaults_to_one_when_param_is_zero():
+    """Reference behavior: if the parameter's own norm is exactly zero
+    (weight_norm == 0), trust_ratio falls back to 1.0 rather than
+    dividing by (near-)zero or collapsing the update to nothing.
+    """
+    torch.manual_seed(0)
+    beta1, beta2, eps, lr = 0.9, 0.999, 1e-6, 0.1
+    param = torch.nn.Parameter(torch.zeros(4, 4))
+    opt = Lamb([param], lr=lr, betas=(beta1, beta2), eps=eps)
+    grad = torch.ones_like(param)
+    param.grad = grad.clone()
+    opt.step()
+
+    # with trust_ratio=1.0 (since param started at exactly zero norm):
+    # update = -lr * adam_step, no bias correction, so
+    # adam_step = (1-beta1)*grad / (sqrt((1-beta2)*grad^2) + eps)
+    exp_avg = (1 - beta1) * grad
+    exp_avg_sq = (1 - beta2) * grad ** 2
+    adam_step = exp_avg / (exp_avg_sq.sqrt() + eps)
+    expected = -lr * 1.0 * adam_step  # trust_ratio forced to 1.0 by the zero-norm fallback
+
+    assert torch.allclose(param.detach(), expected, atol=1e-5)
+
+
+def test_lamb_no_bias_correction():
+    """Reference implementation explicitly omits bias correction (a real,
+    easy-to-miss deviation from naive Adam intuition) -- checked by
+    comparing against a hand-computed first-step update with no bias
+    correction terms.
+    """
+    torch.manual_seed(0)
+    param = torch.nn.Parameter(torch.tensor([1.0, 1.0, 1.0, 1.0]))
+    grad = torch.tensor([2.0, 2.0, 2.0, 2.0])
+    lr, beta1, beta2, eps = 0.1, 0.9, 0.999, 1e-6
+
+    opt = Lamb([param], lr=lr, betas=(beta1, beta2), eps=eps)
+    param.grad = grad.clone()
+    opt.step()
+
+    exp_avg = (1 - beta1) * grad
+    exp_avg_sq = (1 - beta2) * grad ** 2
+    adam_step = exp_avg / (exp_avg_sq.sqrt() + eps)  # NO bias correction division
+    weight_norm = torch.tensor([1.0, 1.0, 1.0, 1.0]).norm().clamp(0, 10)  # pre-update param norm
+    adam_norm = adam_step.norm()
+    trust_ratio = (weight_norm / adam_norm).item()
+    expected = torch.ones(4) - lr * trust_ratio * adam_step
+
+    assert torch.allclose(param.detach(), expected, atol=1e-4)
+
+
+def test_zeropower_per_head_isolates_heads():
+    """The defining correctness property of 'per-head': changing one
+    head's input block must not change another head's output block.
+    Without this, it would just be a reshaped whole-matrix operation.
+    """
+    torch.manual_seed(0)
+    n_heads = 4
+    G = torch.randn(n_heads * 6, 10)  # 4 heads x head_dim=6, in_dim=10
+
+    out_a = zeropower_per_head(G, n_heads=n_heads, steps=5)
+
+    G_modified = G.clone()
+    G_modified[0:6] += 100.0  # drastically change only head 0's block
+
+    out_b = zeropower_per_head(G_modified, n_heads=n_heads, steps=5)
+
+    # head 0's output changed, but heads 1-3 must be untouched
+    assert not torch.allclose(out_a[0:6], out_b[0:6])
+    assert torch.allclose(out_a[6:], out_b[6:], atol=1e-6)
+
+
+def test_muon_per_head_param_groups_shapes():
+    cfg = _tiny_cfg()
+    model = DecoderOnlyTransformer(cfg)
+    opt = build_optimizer("muon_per_head", model, lr=0.02)
+
+    qkv_group = next(g for g in opt.param_groups if g.get("per_head") and g["n_heads"] == 3 * cfg.n_heads)
+    proj_group = next(g for g in opt.param_groups if g.get("per_head") and g["n_heads"] == cfg.n_heads)
+    mlp_group = next(g for g in opt.param_groups if g["use_muon"] and not g.get("per_head", False))
+    other_group = next(g for g in opt.param_groups if not g["use_muon"])
+
+    assert qkv_group["head_axis"] == 0
+    assert proj_group["head_axis"] == 1
+    assert len(qkv_group["params"]) > 0
+    assert len(proj_group["params"]) > 0
+    assert len(mlp_group["params"]) > 0
+    assert len(other_group["params"]) > 0
+    # every qkv weight's row count must actually be divisible by 3*n_heads
+    for p in qkv_group["params"]:
+        assert p.size(0) % (3 * cfg.n_heads) == 0
+    for p in proj_group["params"]:
+        assert p.size(1) % cfg.n_heads == 0

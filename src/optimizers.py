@@ -41,6 +41,25 @@ what changed and why.
   matches its `nesterov=False` option, not its default. No weight decay
   is applied here either (native defaults to 0.1, decoupled). Neither
   difference has been tested for impact on this project's results.
+
+- LAMB (You et al., "Large Batch Optimization for Deep Learning: Training
+  BERT in 76 Minutes," ICLR 2020): matches a well-known reference
+  implementation (github.com/cybertronai/pytorch-lamb) rather than paper
+  pseudocode alone. Adam-style per-parameter moments, but NO bias
+  correction (the paper's v3 explicitly omits debiasing -- easy to miss),
+  scaled by a per-whole-tensor ("per-layer") trust ratio = ||param|| /
+  ||adam-style update||, with the param norm clamped to [0, 10] to guard
+  against trust-ratio blowup.
+
+- Per-head Muon (this repo's own variant, exploring whether orthogonalizing
+  each attention head's weight sub-block independently, rather than the
+  whole qkv/proj matrix at once, changes anything): `qkv.weight`'s output
+  rows are ordered [Q,K,V] x [head] x [within-head] contiguously (matches
+  how `CausalSelfAttention.forward` reshapes it), so it's split into
+  `3 * n_heads` equal row-chunks; `proj.weight`'s input columns are
+  ordered [head] x [within-head], so it's split into `n_heads` equal
+  column-chunks. Newton-Schulz runs independently on each chunk. MLP
+  weights have no head structure and use whole-matrix Muon unchanged.
 """
 from typing import Iterable
 
@@ -67,6 +86,30 @@ def zeropower_via_newtonschulz(G: torch.Tensor, steps: int = 5, eps: float = 1e-
     if transpose:
         X = X.T
     return X
+
+
+def zeropower_per_head(G: torch.Tensor, n_heads: int, steps: int = 5,
+                        eps: float = 1e-7, head_axis: int = 0) -> torch.Tensor:
+    """Apply Newton-Schulz orthogonalization independently to each of
+    n_heads equal contiguous chunks along `head_axis`, instead of to the
+    whole matrix at once.
+
+    head_axis=0 splits rows (matches qkv.weight: output rows ordered
+    [Q,K,V] x [head] x [within-head] contiguously -- pass
+    n_heads=3*model_n_heads to isolate each (Q/K/V, head) block).
+    head_axis=1 splits columns (matches proj.weight: input columns
+    ordered [head] x [within-head]).
+    """
+    if head_axis == 1:
+        return zeropower_per_head(G.T.contiguous(), n_heads, steps, eps, head_axis=0).T
+    assert G.size(0) % n_heads == 0, f"{G.size(0)} not divisible by n_heads={n_heads}"
+    head_dim = G.size(0) // n_heads
+    chunks = G.reshape(n_heads, head_dim, -1)
+    out = torch.stack([
+        zeropower_via_newtonschulz(chunks[h], steps=steps, eps=eps)
+        for h in range(n_heads)
+    ])
+    return out.reshape(G.shape)
 
 
 def _neuron_norm(x: torch.Tensor) -> torch.Tensor:
@@ -161,7 +204,13 @@ class Muon(Optimizer):
                         state["momentum_buf"] = torch.zeros_like(p)
                     buf = state["momentum_buf"]
                     buf.mul_(group["momentum"]).add_(g)
-                    update = zeropower_via_newtonschulz(buf, steps=group["ns_steps"])
+                    if group.get("per_head", False):
+                        update = zeropower_per_head(
+                            buf, n_heads=group["n_heads"], steps=group["ns_steps"],
+                            head_axis=group.get("head_axis", 0),
+                        )
+                    else:
+                        update = zeropower_via_newtonschulz(buf, steps=group["ns_steps"])
                     shape_scale = max(1.0, p.size(0) / p.size(1)) ** 0.5
                     p.add_(update, alpha=-group["lr"] * shape_scale)
                 else:
@@ -178,6 +227,51 @@ class Muon(Optimizer):
                     denom = (state["exp_avg_sq"] / bc2).sqrt().add_(group["adamw_eps"])
                     step_size = group["adamw_lr"] / bc1
                     p.sub_(step_size * state["exp_avg"] / denom)
+        return loss
+
+
+class Lamb(Optimizer):
+    """Matches github.com/cybertronai/pytorch-lamb closely: no bias
+    correction, param norm clamped to [0, 10] before computing the trust
+    ratio, trust ratio defaults to 1.0 if either norm is exactly zero.
+    """
+
+    def __init__(self, params: Iterable[torch.nn.Parameter], lr: float = 1e-3,
+                 betas: tuple = (0.9, 0.999), eps: float = 1e-6,
+                 weight_decay: float = 0.0):
+        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = closure() if closure is not None else None
+        for group in self.param_groups:
+            beta1, beta2 = group["betas"]
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                grad = p.grad
+                state = self.state[p]
+                if len(state) == 0:
+                    state["exp_avg"] = torch.zeros_like(p)
+                    state["exp_avg_sq"] = torch.zeros_like(p)
+
+                exp_avg, exp_avg_sq = state["exp_avg"], state["exp_avg_sq"]
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                weight_norm = p.norm().clamp(0, 10)
+                adam_step = exp_avg / exp_avg_sq.sqrt().add(group["eps"])
+                if group["weight_decay"] != 0:
+                    adam_step = adam_step + group["weight_decay"] * p
+                adam_norm = adam_step.norm()
+
+                if weight_norm == 0 or adam_norm == 0:
+                    trust_ratio = 1.0
+                else:
+                    trust_ratio = (weight_norm / adam_norm).item()
+
+                p.add_(adam_step, alpha=-group["lr"] * trust_ratio)
         return loss
 
 
@@ -201,6 +295,34 @@ def _muon_param_groups(model: torch.nn.Module, lr: float, adamw_lr: float) -> li
     ]
 
 
+def _muon_per_head_param_groups(model: torch.nn.Module, lr: float, adamw_lr: float) -> list[dict]:
+    """Like _muon_param_groups, but qkv/proj weights get their own groups
+    flagged for per-head Newton-Schulz (see zeropower_per_head), while MLP
+    weights (no head structure) still get whole-matrix Muon.
+    """
+    n_heads = model.cfg.n_heads
+    qkv_weights, proj_weights, mlp_weights, other_params = [], [], [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.dim() == 2 and "qkv.weight" in name:
+            qkv_weights.append(p)
+        elif p.dim() == 2 and "proj.weight" in name:
+            proj_weights.append(p)
+        elif p.dim() == 2 and "blocks" in name:
+            mlp_weights.append(p)
+        else:
+            other_params.append(p)
+    return [
+        {"params": qkv_weights, "use_muon": True, "per_head": True,
+         "n_heads": 3 * n_heads, "head_axis": 0, "lr": lr},
+        {"params": proj_weights, "use_muon": True, "per_head": True,
+         "n_heads": n_heads, "head_axis": 1, "lr": lr},
+        {"params": mlp_weights, "use_muon": True, "per_head": False, "lr": lr},
+        {"params": other_params, "use_muon": False, "lr": lr, "adamw_lr": adamw_lr},
+    ]
+
+
 def build_optimizer(name: str, model: torch.nn.Module, lr: float, **kwargs) -> Optimizer:
     name = name.lower()
     if name == "adamw":
@@ -216,4 +338,10 @@ def build_optimizer(name: str, model: torch.nn.Module, lr: float, **kwargs) -> O
     if name == "muon":
         groups = _muon_param_groups(model, lr=lr, adamw_lr=kwargs.get("adamw_lr", lr))
         return Muon(groups, lr=lr, momentum=kwargs.get("momentum", 0.95))
+    if name == "muon_per_head":
+        groups = _muon_per_head_param_groups(model, lr=lr, adamw_lr=kwargs.get("adamw_lr", lr))
+        return Muon(groups, lr=lr, momentum=kwargs.get("momentum", 0.95))
+    if name == "lamb":
+        return Lamb(model.parameters(), lr=lr, betas=kwargs.get("betas", (0.9, 0.999)),
+                    eps=kwargs.get("eps", 1e-6), weight_decay=kwargs.get("weight_decay", 0.0))
     raise ValueError(f"unknown optimizer: {name}")
