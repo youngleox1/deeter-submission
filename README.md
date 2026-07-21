@@ -98,6 +98,34 @@ across a fixed grid of learning rates:
 - The range of learning rates for which it stays within that same X% band is
   **at least 2x wider** (in log-LR space) than AdamW's corresponding band.
 
+**How basin width is actually computed** (`analysis.ipynb`, not just
+described in prose): for a given optimizer, take its own 9-point log-spaced
+LR grid, keep the subset of grid points whose mean-across-seeds best
+validation loss is `<= threshold` (where `threshold = AdamW's best loss x
+(1 + X)` — the same absolute threshold for every optimizer, anchored to
+AdamW), and report
+
+```
+log10_basin_width = log10(max LR in that subset) - log10(min LR in that subset)
+```
+
+Two things worth being explicit about rather than leaving implicit:
+
+- This is a **grid-resolution-limited estimate**, not the true continuous
+  basin. The actual threshold-crossing point lies somewhere between two
+  adjacent grid points; since the grid is evenly log-spaced at 0.375
+  decades/step, the reported width is always a multiple of 0.375 and is a
+  systematic *underestimate* of the true width (it can't resolve anything
+  finer than one grid step).
+- The code takes `max - min` of **all** qualifying grid points, without
+  checking they're contiguous. If a non-qualifying point were sandwiched
+  between two qualifying ones (a "hole" in the basin), this formula would
+  silently report the full outer span rather than flagging the gap. In
+  this project's actual data every qualifying set happens to be a
+  contiguous run (verified by inspection, not enforced in code) — but
+  that's a property of these particular loss curves being roughly
+  unimodal in LR, not a guarantee the method provides.
+
 **Divergence rate.** Fraction of (LR, seed) runs that diverge (NaN/Inf loss,
 or loss exceeding a fixed blowup threshold) at each LR. This is reported
 alongside basin width because it is binary and unambiguous, and arguably the
