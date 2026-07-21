@@ -26,13 +26,21 @@ what changed and why.
   implementation explicitly disallows this.
 
 - Muon (Jordan et al., "Muon: An optimizer for hidden layers in neural
-  networks," 2024 — technical report, not peer-reviewed): momentum, then
-  approximate orthogonalization of the momentum matrix via Newton-Schulz
-  iteration, applied only to 2D hidden-layer weight matrices. Following the
-  reference design, this is a hybrid optimizer: parameters flagged
-  `use_muon=False` in their param group (embeddings, output head, biases,
-  norm params) instead receive a plain AdamW-style update in the same
-  optimizer step.
+  networks," 2024 — technical report, not peer-reviewed; not in any
+  PyTorch version when this was written, added as torch.optim.Muon only
+  in PyTorch 2.9): momentum, then approximate orthogonalization of the
+  momentum matrix via Newton-Schulz iteration, applied only to 2D
+  hidden-layer weight matrices. Following the reference design, this is a
+  hybrid optimizer: parameters flagged `use_muon=False` in their param
+  group (embeddings, output head, biases, norm params) instead receive a
+  plain AdamW-style update in the same optimizer step. Checked against the
+  now-official implementation: Newton-Schulz coefficients and the
+  LR-adjustment formula match exactly, but this uses PLAIN (heavy-ball)
+  momentum for the orthogonalization input, not native Muon's DEFAULT
+  Nesterov momentum (`g_t + momentum * B_t` instead of just `B_t`) --
+  matches its `nesterov=False` option, not its default. No weight decay
+  is applied here either (native defaults to 0.1, decoupled). Neither
+  difference has been tested for impact on this project's results.
 """
 from typing import Iterable
 

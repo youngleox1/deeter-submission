@@ -333,14 +333,27 @@ learnable signal exists in this data at all._
   here due to time; a longer-training check on the top 2-3 LRs per
   optimizer would be the natural follow-up.
 - **Muon is a simplified, from-scratch reproduction**, not a verbatim port
-  of the reference implementation — see `src/optimizers.py` docstring for
-  exactly what's simplified. **Nero was initially a much more meaningfully
-  different reimplementation** (missing mean-centering, wrong projection
-  target, sum-vs-mean second moment, spurious momentum on 1D params) until
-  corrected against the actual reference code (github.com/jxbz/nero) —
-  see `v0.5.0-nero-fix` tag. The corrected version's remaining
-  underperformance vs. AdamW is treated as a genuine finding, not
-  attributed to further unverified implementation differences.
+  of a reference implementation. (Muon wasn't in any version of PyTorch
+  when this was written — it was added as `torch.optim.Muon` in PyTorch
+  2.9; this project's installed torch is 2.7.1, which doesn't have it.)
+  Checked against the now-official implementation
+  (github.com/pytorch/pytorch/blob/main/torch/optim/_muon.py) while
+  investigating a per-head variant on a separate branch: our Newton-Schulz
+  coefficients and LR-adjustment formula match exactly, but our momentum
+  is **plain (heavy-ball)**, not the native implementation's **default
+  Nesterov** momentum (orthogonalization input is `g_t + momentum * B_t`,
+  not just the momentum buffer `B_t`) — matches native Muon's
+  `nesterov=False` option, just not its default. We also apply no weight
+  decay (native defaults to 0.1, decoupled). Neither difference has been
+  tested for impact on the results above; noted here rather than silently
+  left as an unexamined assumption. **Nero was initially a much more
+  meaningfully different reimplementation** (missing mean-centering,
+  wrong projection target, sum-vs-mean second moment, spurious momentum
+  on 1D params) until corrected against the actual reference code
+  (github.com/jxbz/nero) — see `v0.5.0-nero-fix` tag. The corrected
+  version's remaining underperformance vs. AdamW is treated as a genuine
+  finding, not attributed to further unverified implementation
+  differences.
 - **LAMB and full Modula/modular-norm were scoped out** of the optimizer
   comparison (see Optimizer candidates above) for time-budget reasons, not
   because they're less relevant.
