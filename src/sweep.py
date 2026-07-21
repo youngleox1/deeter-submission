@@ -14,7 +14,7 @@ from typing import Any, Dict, List
 
 import yaml
 
-from src.data.text import TinyShakespeare
+from src.data import build_dataset
 from src.model import DecoderOnlyTransformer, ModelConfig
 from src.train import TrainConfig, resolve_device, train_one_run
 
@@ -35,7 +35,7 @@ def run_sweep(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     results = []
     for optimizer_name, lrs in lr_grids.items():
         for lr, seed in itertools.product(lrs, seeds):
-            data = TinyShakespeare(seed=seed)
+            data = build_dataset(config["data"], seed=seed)
             model_cfg = ModelConfig(vocab_size=data.vocab_size, **model_cfg_kwargs)
             model = DecoderOnlyTransformer(model_cfg)
             cfg = TrainConfig(

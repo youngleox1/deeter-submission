@@ -113,10 +113,10 @@ def _cli():
     with open(args.config) as f:
         raw = yaml.safe_load(f)
 
-    from src.data.text import TinyShakespeare
+    from src.data import build_dataset
     from src.model import DecoderOnlyTransformer, ModelConfig
 
-    data = TinyShakespeare(seed=raw.get("seed", 0))
+    data = build_dataset(raw["data"], seed=raw.get("seed", 0))
     model_cfg = ModelConfig(vocab_size=data.vocab_size, **raw["model"])
     model = DecoderOnlyTransformer(model_cfg)
     raw["train"]["device"] = resolve_device(raw["train"].get("device", "cpu"))

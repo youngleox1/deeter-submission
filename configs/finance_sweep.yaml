@@ -1,18 +1,20 @@
-# Core experiment: LR-basin-width and divergence-rate comparison across
-# AdamW / SGD+momentum / Nero / Muon on char-level tiny-Shakespeare.
-#
-# Each optimizer's LR grid is 9 points log-spaced across 3 orders of
-# magnitude (10^-1.5 to 10^+1.5), centered on a reasonable guess for that
-# optimizer's natural scale -- NOT a shared grid across optimizers, since
-# their natural LR scales differ substantially (see src/sweep.py docstring).
+# Finance stretch experiment: same LR grids, same optimizer hyperparameters,
+# and the same model/training code as configs/core_sweep.yaml -- only the
+# `data` section changes (discretized-return tokens instead of characters).
+# Reusing the exact same numeric LR grids (rather than re-centering them for
+# this domain) is deliberate: it's a fair test of whether the basin-width /
+# divergence-rate findings transfer, not a re-tuned comparison.
 
-output_csv: results/core/sweep_results.csv
+output_csv: results/finance/sweep_results.csv
 
 data:
-  type: text
+  type: finance
+  n_bins: 8
+  val_fraction: 0.15
+  # tickers / date range use FinanceReturns defaults, see src/data/finance.py
 
 model:
-  max_seq_len: 128
+  max_seq_len: 64
   d_model: 128
   n_layers: 4
   n_heads: 4
@@ -21,12 +23,12 @@ model:
 
 train:
   batch_size: 64
-  seq_len: 128
+  seq_len: 64
   max_steps: 500
   eval_interval: 100
   eval_iters: 20
   divergence_threshold: 10000.0
-  device: auto  # resolves to cuda if available, else cpu
+  device: auto
 
 sweep:
   seeds: [0, 1, 2]
@@ -47,4 +49,4 @@ sweep:
       beta: 0.999
     muon:
       momentum: 0.95
-      adamw_lr: 3.0e-3  # fixed fallback-branch LR, so sweeping 'lr' only varies the Muon branch
+      adamw_lr: 3.0e-3

@@ -7,6 +7,7 @@ from src.sweep import CSV_FIELDS, run_sweep, save_results_csv
 
 def _tiny_sweep_config():
     return {
+        "data": {"type": "text"},
         "model": {
             "max_seq_len": 16, "d_model": 16, "n_layers": 2,
             "n_heads": 2, "mlp_ratio": 2, "dropout": 0.0,
@@ -46,13 +47,22 @@ def test_save_results_csv_writes_all_rows_with_expected_columns(tmp_path):
     assert set(rows[0].keys()) == set(CSV_FIELDS)
 
 
-def test_core_sweep_yaml_has_expected_structure():
-    with open("configs/core_sweep.yaml") as f:
+def _assert_sweep_config_structure(path):
+    with open(path) as f:
         config = yaml.safe_load(f)
 
+    assert config["data"]["type"] in ("text", "finance")
     assert "sweep" in config and "lr_grids" in config["sweep"]
     lr_grids = config["sweep"]["lr_grids"]
     assert set(lr_grids.keys()) == {"adamw", "sgd", "nero", "muon"}
     for name, lrs in lr_grids.items():
         assert len(lrs) == 9, f"{name} grid should have 9 points"
         assert lrs == sorted(lrs), f"{name} grid should be sorted ascending"
+
+
+def test_core_sweep_yaml_has_expected_structure():
+    _assert_sweep_config_structure("configs/core_sweep.yaml")
+
+
+def test_finance_sweep_yaml_has_expected_structure():
+    _assert_sweep_config_structure("configs/finance_sweep.yaml")
