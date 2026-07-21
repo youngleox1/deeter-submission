@@ -303,9 +303,68 @@ tested-and-not-confirmed hypothesis with a genuine, unanticipated
 secondary finding, not retro-fitted into either story after the fact.
 
 ### Finance stretch results
-_TBD — sweep rerunning with corrected Nero; see `finance-stretch` branch
-for the in-progress writeup and a separate investigation into whether any
-learnable signal exists in this data at all._
+
+Same setup as the core experiment (4 optimizers x 9 LRs x 3 seeds = 108
+runs, 500 steps, same code path via the data factory, rerun against the
+corrected Nero). Raw results: `results/finance/sweep_results.csv`.
+Analysis: `analysis_finance.ipynb`, figures in `results/finance/*.png`.
+
+**First finding: there isn't enough learnable signal here for the
+basin-width comparison to mean anything, and that's reported as the
+honest result rather than forced into a transfer/no-transfer verdict.**
+With `n_bins=8`, a model that has learned nothing gets exactly
+`ln(8) ≈ 2.079` (uniform-distribution cross-entropy). Every optimizer's
+loss clusters within **1.5% of that baseline** across nearly the entire
+LR range (see `results/finance/loss_vs_lr.png` — note the y-axis range
+compared to the core experiment's version of the same plot).
+
+| Optimizer | Best LR | Model directional accuracy | Naive baseline | Brier score |
+|---|---|---|---|---|
+| AdamW | 9.5e-5 | 49.3% | 50.8% | 0.251 |
+| SGD | 0.30 | 50.2% | 50.8% | 0.251 |
+| Nero | 0.071 | 49.1% | 50.8% | 0.251 |
+| Muon | 6.3e-4 | 49.4% | 50.8% | 0.251 |
+
+**None of the four optimizers beat the naive persistence baseline**
+(predict yesterday's direction repeats), and Brier scores (~0.25) are
+indistinguishable from a coin flip (a predictor that always outputs 50/50
+gets exactly 0.25 by construction). Taken at face value, the basin-width
+finding from the core experiment doesn't get a meaningful transfer test
+here — not because it failed to transfer, but because there wasn't
+enough of a loss landscape being fit for optimizer choice to matter.
+
+**Second finding, and the more important one: that "no signal" reading
+turned out to be about the pipeline, not the data.** Prompted by how
+clean the null result above looked, a separate, much simpler check
+(`scripts/investigate_finance_signal.py`,
+`results/finance/signal_investigation.txt`) was run directly on the
+cached price data, independent of the neural pipeline entirely:
+
+- **Autocorrelation** at lag 1 is highly significant for SPY, AAPL, MSFT,
+  and JPM (Ljung-Box p < 0.0001 for 3 of those 4), consistent with the
+  well-documented short-term reversal effect in daily equity returns.
+- **A trivial 5-lag logistic regression** (same time-ordered 85/15 split
+  as this project's own loader) **beats the naive persistence baseline on
+  every single one of the 6 tickers** — mean test accuracy 56.4% vs. 52.0%
+  naive.
+
+So there **is** real, modest, well-known signal in this exact data. The
+honest conclusion is therefore not "no exploitable signal exists" (market
+efficiency) — it's "**a simple linear method finds a real signal that
+this specific neural pipeline fails to extract**." Most likely cause, not
+confirmed: discretizing returns into 8 quantile bins and optimizing full
+next-bin cross-entropy is a much noisier, higher-entropy objective than
+directly predicting binary direction from 5 lagged values, and a weak
+linear effect can easily get swamped in that harder task within only 500
+steps. This is a genuine limitation of this project's finance pipeline,
+not a claim about market efficiency — and it's a materially different,
+more useful thing to have learned than the first finding alone would have
+suggested.
+
+An unexplored, clearly-labeled follow-up (not attempted here, due to
+time): swap the 8-way bin cross-entropy objective for a direct binary
+up/down classification head on the same transformer trunk, to test
+whether that alone closes the gap to the simple logistic baseline.
 
 ## Limitations
 
@@ -362,3 +421,9 @@ learnable signal exists in this data at all._
   sweep only varies the Muon branch; the fallback-branch LR is held fixed
   (see `configs/core_sweep.yaml`). A full 2D sweep over both would be more
   thorough but was out of scope here.
+- **The finance stretch's neural pipeline fails to extract signal that
+  demonstrably exists** in this exact data (see Finance stretch results
+  above) — likely because discretizing returns into 8 bins and optimizing
+  full next-bin cross-entropy is a much noisier objective than directly
+  predicting binary direction. Swapping in a direct binary classification
+  head is the natural fix; not attempted here due to time.
