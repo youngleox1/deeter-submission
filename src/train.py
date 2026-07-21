@@ -19,6 +19,15 @@ import yaml
 from src.optimizers import build_optimizer
 
 
+def resolve_device(device: str) -> str:
+    """'auto' resolves to cuda if available, else cpu; anything else passes
+    through unchanged (so an explicit 'cpu' or 'cuda' still works as-is).
+    """
+    if device == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return device
+
+
 @dataclass
 class TrainConfig:
     optimizer_name: str
@@ -110,6 +119,7 @@ def _cli():
     data = TinyShakespeare(seed=raw.get("seed", 0))
     model_cfg = ModelConfig(vocab_size=data.vocab_size, **raw["model"])
     model = DecoderOnlyTransformer(model_cfg)
+    raw["train"]["device"] = resolve_device(raw["train"].get("device", "cpu"))
     train_cfg = TrainConfig(**raw["train"])
 
     result = train_one_run(model, data, train_cfg)

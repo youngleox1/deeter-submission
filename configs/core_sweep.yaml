@@ -23,6 +23,7 @@ train:
   eval_interval: 100
   eval_iters: 20
   divergence_threshold: 10000.0
+  device: auto  # resolves to cuda if available, else cpu
 
 sweep:
   seeds: [0, 1, 2]

@@ -16,7 +16,7 @@ import yaml
 
 from src.data.text import TinyShakespeare
 from src.model import DecoderOnlyTransformer, ModelConfig
-from src.train import TrainConfig, train_one_run
+from src.train import TrainConfig, resolve_device, train_one_run
 
 CSV_FIELDS = [
     "optimizer_name", "lr", "seed", "diverged", "steps_completed",
@@ -26,7 +26,8 @@ CSV_FIELDS = [
 
 def run_sweep(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     model_cfg_kwargs = config["model"]
-    train_cfg_kwargs = config["train"]
+    train_cfg_kwargs = dict(config["train"])
+    train_cfg_kwargs["device"] = resolve_device(train_cfg_kwargs.get("device", "cpu"))
     seeds = config["sweep"]["seeds"]
     lr_grids = config["sweep"]["lr_grids"]
     optimizer_kwargs_by_name = config["sweep"].get("optimizer_kwargs", {})
