@@ -1,0 +1,43 @@
+# Ablation: does disabling LayerNorm's learnable affine params change
+# Nero's underperformance in the core experiment? Same LR grid, seeds,
+# steps, and everything else as configs/core_sweep.yaml -- only
+# model.layernorm_affine and the optimizer list differ.
+#
+# Motivation: Nero's sphere projection assumes a neuron's weight-vector
+# scale is irrelevant because downstream normalization absorbs it. That
+# assumption is weaker if the normalization layer itself has a learnable
+# affine scale/shift optimized by a separate, uncoordinated update rule
+# (our Nero implementation's 1D-parameter fallback branch).
+
+output_csv: results/ablations/nero_no_ln_affine/sweep_results.csv
+
+data:
+  type: text
+
+model:
+  max_seq_len: 128
+  d_model: 128
+  n_layers: 4
+  n_heads: 4
+  mlp_ratio: 4
+  dropout: 0.0
+  layernorm_affine: false
+
+train:
+  batch_size: 64
+  seq_len: 128
+  max_steps: 500
+  eval_interval: 100
+  eval_iters: 20
+  divergence_threshold: 10000.0
+  device: auto
+
+sweep:
+  seeds: [0, 1, 2]
+
+  lr_grids:
+    nero: [9.487e-4, 2.276e-3, 5.335e-3, 1.265e-2, 3.000e-2, 7.114e-2, 1.687e-1, 4.000e-1, 9.487e-1]
+
+  optimizer_kwargs:
+    nero:
+      beta: 0.999
