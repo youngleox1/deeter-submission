@@ -1,0 +1,84 @@
+import numpy as np
+import pandas as pd
+import pytest
+
+from src.data import finance as finance_module
+from src.data.finance import FinanceReturns, ReturnTokenizer
+
+
+def _make_fake_close_series(n=300, seed=0, val_outlier=False, val_fraction=0.2):
+    rng = np.random.RandomState(seed)
+    log_rets = rng.normal(0, 0.01, size=n)
+    if val_outlier:
+        split = int(n * (1 - val_fraction))
+        log_rets[split:] += rng.choice([-1, 1], size=n - split) * 5.0  # huge spike, VAL-only
+    price = 100 * np.exp(np.cumsum(log_rets))
+    dates = pd.date_range("2020-01-01", periods=n, freq="B")
+    return pd.Series(price, index=dates, name="Close")
+
+
+def _patch_fetch(monkeypatch, series_by_ticker):
+    def _fetch(ticker, start, end, cache_dir):
+        return series_by_ticker[ticker]
+    monkeypatch.setattr(finance_module, "_fetch_ticker_close", _fetch)
+
+
+def test_tokenizer_bin_edges_unaffected_by_extreme_val_period_values(monkeypatch):
+    """Regression test for the specific leakage failure mode this loader
+    is designed to avoid: if the tokenizer were (incorrectly) fit on the
+    full series, an extreme spike placed only in the val period would
+    shift the bin edges. Since the spike occurs strictly after the split,
+    the train-period prices/returns are byte-for-byte identical between
+    the two datasets below -- so fit-on-train-only means the edges must
+    be exactly equal despite the val period being wildly different.
+    """
+    _patch_fetch(monkeypatch, {"FAKE1": _make_fake_close_series(seed=1, val_outlier=False)})
+    ds_clean = FinanceReturns(tickers=["FAKE1"], val_fraction=0.2, n_bins=8)
+
+    _patch_fetch(monkeypatch, {"FAKE1": _make_fake_close_series(seed=1, val_outlier=True)})
+    ds_spiked = FinanceReturns(tickers=["FAKE1"], val_fraction=0.2, n_bins=8)
+
+    assert np.allclose(ds_clean.tokenizer.bin_edges, ds_spiked.tokenizer.bin_edges), (
+        "bin edges changed when only the VAL period was perturbed -- "
+        "the tokenizer must be fit on train data only"
+    )
+
+
+def test_split_is_time_ordered_and_lengths_match_val_fraction(monkeypatch):
+    _patch_fetch(monkeypatch, {"FAKE1": _make_fake_close_series(n=300, seed=2)})
+    ds = FinanceReturns(tickers=["FAKE1"], val_fraction=0.2, n_bins=8)
+
+    total_len = len(ds.train_streams[0]) + len(ds.val_streams[0])
+    assert total_len == 299  # 300 prices -> 299 log returns
+    assert abs(len(ds.val_streams[0]) / total_len - 0.2) < 0.01
+
+
+def test_get_batch_shapes(monkeypatch):
+    _patch_fetch(monkeypatch, {
+        "FAKE1": _make_fake_close_series(n=300, seed=3),
+        "FAKE2": _make_fake_close_series(n=300, seed=4),
+    })
+    ds = FinanceReturns(tickers=["FAKE1", "FAKE2"], val_fraction=0.2, n_bins=8)
+    x, y = ds.get_batch("train", batch_size=6, seq_len=20)
+    assert x.shape == (6, 20)
+    assert y.shape == (6, 20)
+    assert x.dtype == y.dtype
+
+
+def test_get_batch_raises_when_no_stream_long_enough(monkeypatch):
+    _patch_fetch(monkeypatch, {"FAKE1": _make_fake_close_series(n=50, seed=5)})
+    ds = FinanceReturns(tickers=["FAKE1"], val_fraction=0.5, n_bins=8)
+    with pytest.raises(ValueError):
+        ds.get_batch("val", batch_size=2, seq_len=1000)
+
+
+def test_return_tokenizer_bin_to_direction_sign_matches_bin_order():
+    tokenizer = ReturnTokenizer(n_bins=4)
+    train_returns = np.array([-0.05, -0.04, -0.01, -0.005, 0.005, 0.01, 0.04, 0.05])
+    tokenizer.fit(train_returns)
+
+    directions = tokenizer.bin_to_direction(np.arange(4))
+    # lowest-index bins should be non-positive, highest-index bins non-negative
+    assert directions[0] <= 0
+    assert directions[-1] >= 0
+    assert list(directions) == sorted(directions)
