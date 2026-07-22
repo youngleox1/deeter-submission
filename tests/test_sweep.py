@@ -77,3 +77,14 @@ def test_optimizer_extensions_sweep_yaml_has_expected_structure():
 
 def test_modula_sweep_yaml_has_expected_structure():
     _assert_sweep_config_structure("configs/modula_sweep.yaml", {"modula"})
+
+
+def test_schedule_sweep_yaml_has_expected_structure_and_schedule_enabled():
+    _assert_sweep_config_structure(
+        "configs/schedule_sweep.yaml", {"adamw", "muon", "lamb"},
+    )
+    with open("configs/schedule_sweep.yaml") as f:
+        config = yaml.safe_load(f)
+    assert config["train"]["use_cosine_schedule"] is True
+    assert config["train"]["warmup_steps"] > 0
+    assert config["train"]["max_steps"] > 500  # meaningfully longer than the other sweeps

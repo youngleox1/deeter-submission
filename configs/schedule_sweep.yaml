@@ -1,0 +1,55 @@
+# Cosine-warmup schedule + longer training, addressing two limitations
+# flagged early and left unaddressed until now: no LR schedule anywhere,
+# and 500 steps being short relative to typical convention for this toy
+# setup. 1 seed per point (not 3) to afford 6x longer runs within a
+# reasonable time budget -- a deliberate noise/depth tradeoff, not an
+# oversight.
+#
+# LR grids reused exactly from configs/optimizer_extensions_sweep.yaml
+# (same peak-LR values), so this is the same 9-point grid interpreted as
+# PEAK LR under the schedule rather than a flat LR.
+
+output_csv: results/optimizer_extensions/schedule_sweep_results.csv
+
+data:
+  type: text
+
+model:
+  max_seq_len: 128
+  d_model: 128
+  n_layers: 4
+  n_heads: 4
+  mlp_ratio: 4
+  dropout: 0.0
+
+train:
+  batch_size: 64
+  seq_len: 128
+  max_steps: 3000          # 6x the 500 steps used everywhere else
+  eval_interval: 200
+  eval_iters: 20
+  divergence_threshold: 10000.0
+  device: auto
+  use_cosine_schedule: true
+  warmup_steps: 200        # ~6.7% of max_steps, standard convention
+  min_lr_ratio: 0.1        # decay to 10% of peak, not to zero
+
+sweep:
+  seeds: [0]
+
+  lr_grids:
+    adamw: [9.487e-5, 2.276e-4, 5.335e-4, 1.265e-3, 3.000e-3, 7.114e-3, 1.687e-2, 4.000e-2, 9.487e-2]
+    muon:  [6.325e-4, 1.517e-3, 3.557e-3, 8.434e-3, 2.000e-2, 4.743e-2, 1.125e-1, 2.667e-1, 6.325e-1]
+    lamb:  [9.487e-5, 2.276e-4, 5.335e-4, 1.265e-3, 3.000e-3, 7.114e-3, 1.687e-2, 4.000e-2, 9.487e-2]
+
+  optimizer_kwargs:
+    adamw:
+      betas: [0.9, 0.95]
+      weight_decay: 0.0
+    muon:
+      momentum: 0.95
+      adamw_lr: 3.0e-3
+    lamb:
+      betas: [0.9, 0.999]
+      eps: 1.0e-6
+      weight_decay: 0.0
