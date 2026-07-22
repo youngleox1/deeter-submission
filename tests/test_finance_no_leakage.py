@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from src.data import finance as finance_module
-from src.data.finance import FinanceReturns, ReturnTokenizer
+from src.data.finance import FinanceReturns, ReturnTokenizer, volatility_scale
 
 
 def _make_fake_close_series(n=300, seed=0, val_outlier=False, val_fraction=0.2):
@@ -82,3 +82,51 @@ def test_return_tokenizer_bin_to_direction_sign_matches_bin_order():
     assert directions[0] <= 0
     assert directions[-1] >= 0
     assert list(directions) == sorted(directions)
+
+
+def test_volatility_scale_drops_exactly_window_days_from_the_start():
+    rng = np.random.RandomState(0)
+    returns = rng.normal(0, 0.01, size=100)
+    scaled = volatility_scale(returns, window=20)
+    assert len(scaled) == 100 - 20
+
+
+def test_volatility_scale_matches_hand_computed_value():
+    returns = np.array([0.01, 0.02, -0.01, 0.03, 0.05, -0.02])
+    window = 3
+    scaled = volatility_scale(returns, window=window)
+    # first scaled value corresponds to day index 3 (0-indexed): trailing
+    # window is returns[0:3] = [0.01, 0.02, -0.01], excluding day 3 itself.
+    # Use pandas' std (ddof=1, sample std) to match the implementation --
+    # numpy's default ddof=0 (population std) gives a different value.
+    expected_std = pd.Series(returns[0:3]).std()
+    expected_first = returns[3] / expected_std
+    assert abs(scaled[0] - expected_first) < 1e-9
+
+
+def test_volatility_scale_is_strictly_causal_no_lookahead():
+    """Changing a return far in the future must not change the scaled
+    value at an earlier day -- the defining no-lookahead property, same
+    discipline as the tokenizer's train/val split test above.
+    """
+    rng = np.random.RandomState(0)
+    returns = rng.normal(0, 0.01, size=100)
+    window = 20
+
+    scaled_original = volatility_scale(returns, window=window)
+
+    returns_modified = returns.copy()
+    returns_modified[90] = 10.0  # huge change, far in the future
+    scaled_modified = volatility_scale(returns_modified, window=window)
+
+    # scaled values for days well before index 90 must be identical
+    assert np.allclose(scaled_original[:50], scaled_modified[:50])
+
+
+def test_finance_returns_with_vol_scale_runs_end_to_end(monkeypatch):
+    _patch_fetch(monkeypatch, {"FAKE1": _make_fake_close_series(n=300, seed=6)})
+    ds = FinanceReturns(tickers=["FAKE1"], val_fraction=0.2, n_bins=2,
+                         vol_scale=True, vol_window=20)
+    x, y = ds.get_batch("train", batch_size=4, seq_len=10)
+    assert x.shape == (4, 10)
+    assert ds.vocab_size == 2

@@ -16,6 +16,17 @@ disclosed explicitly here, no proprietary or non-public data is used.
 Fetched data is cached to src/data/finance_cache/*.csv and vendored in
 this repo (same reasoning as the vendored text corpus: reproducibility
 without a live network dependency), fetched 2026-07-21.
+
+Optional `vol_scale` preprocessing (see `volatility_scale()` below):
+divides returns by a trailing realized-volatility estimate before
+tokenization. Standard practice for taming heavy-tailed, heteroscedastic
+returns (checked against current literature, not assumed) -- added
+alongside a switch to n_bins=2 (binary up/down) as a direct test of the
+project's own earlier diagnosis: an 8-bin discretization + full
+next-bin cross-entropy is a much noisier objective than directly
+predicting the binary quantity actually of interest, plausibly swamping
+the weak signal a simple 5-lag logistic regression finds easily (see
+scripts/investigate_finance_signal.py).
 """
 from pathlib import Path
 from typing import List, Optional
@@ -70,6 +81,25 @@ class ReturnTokenizer:
         return self.n_bins
 
 
+def volatility_scale(returns: np.ndarray, window: int = 20, eps: float = 1e-8) -> np.ndarray:
+    """Divide each return by its trailing realized volatility (std of the
+    PRECEDING `window` returns, strictly excluding the current day) --
+    standard preprocessing for heavy-tailed, heteroscedastic returns
+    before modeling (see README for the literature check behind this).
+
+    Strictly causal: day t's scale uses only [t-window, t), never t
+    itself -- the same no-lookahead discipline as the tokenizer's
+    train/val split. Implemented via `.rolling(window).std().shift(1)`:
+    the shift is what excludes the current day. The first `window` days
+    (insufficient trailing history) are dropped, not estimated from a
+    short/expanding window.
+    """
+    s = pd.Series(returns)
+    trailing_std = s.rolling(window=window).std().shift(1)
+    scaled = (s / trailing_std.clip(lower=eps)).values
+    return scaled[~np.isnan(scaled)]
+
+
 def _fetch_ticker_close(ticker: str, start: str, end: str, cache_dir: Path) -> pd.Series:
     cache_path = cache_dir / f"{ticker}.csv"
     if cache_path.exists():
@@ -94,13 +124,17 @@ class FinanceReturns:
 
     def __init__(self, tickers: Optional[List[str]] = None, start: str = DEFAULT_START,
                  end: str = DEFAULT_END, n_bins: int = 8, val_fraction: float = 0.15,
-                 seed: int = 0, cache_dir: Path = _CACHE_DIR):
+                 seed: int = 0, cache_dir: Path = _CACHE_DIR,
+                 vol_scale: bool = False, vol_window: int = 20):
         self.tickers = tickers or DEFAULT_TICKERS
+        self.vol_scale = vol_scale
 
         raw_returns = []
         for ticker in self.tickers:
             close = _fetch_ticker_close(ticker, start, end, cache_dir)
             log_ret = np.log(close).diff().dropna().values
+            if vol_scale:
+                log_ret = volatility_scale(log_ret, window=vol_window)
             raw_returns.append(log_ret)
 
         split_points = [int(len(r) * (1 - val_fraction)) for r in raw_returns]
