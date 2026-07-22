@@ -308,12 +308,110 @@ opposite direction from the original hypothesis. Reported as a
 tested-and-not-confirmed hypothesis with a genuine, unanticipated
 secondary finding, not retro-fitted into either story after the fact.
 
+### Finance stretch: metrics and preprocessing, precisely
+
+Three versions of this experiment follow below (v1/v2/v3). Rather than
+re-explain the same metrics and preprocessing three times, here is the
+full methodology once, with justification, so each version's results
+section can just report numbers against it.
+
+**Metrics** (`src/eval_finance.py` for the two directional-accuracy
+baselines and Brier score; `src/train.py`/`src/sweep.py` for loss):
+
+- **Validation cross-entropy loss**, compared against the uniform-
+  distribution baseline `ln(n_bins)` (a model that has learned nothing
+  gets exactly this value) — the same metric the core experiment uses,
+  letting the basin-width/divergence-rate methodology carry over
+  unchanged (see Success criteria above).
+- **Persistence baseline** (originally the only baseline reported, now
+  known to be too weak on its own — see below): predicts that tomorrow's
+  direction repeats today's.
+- **Majority-class baseline** (added after review; see the worked
+  example below): predicts the single most common direction in the
+  *training* period, unconditionally, every time.
+- **Brier score**: mean squared error between the model's predicted
+  P(up) and the realized 0/1 outcome. Reported alongside accuracy because
+  a model can match accuracy while being badly overconfident or
+  underconfident — Brier score is the more quant-relevant property for
+  anything downstream that would use the probability, not just the
+  argmax.
+
+**Why two directional baselines, not one — a worked example, not just an
+assertion.** This project initially reported only the persistence
+baseline, and read "AdamW-family model beats persistence" as evidence
+of a real edge. That was an incomplete comparison. Here is why, with the
+actual numbers:
+
+These six tickers have real positive drift — daily P(up) is
+**51.8%-54.6%** per ticker over the full 2015-2025 history (SPY: 54.6%),
+confirmed by direct computation on the cached price data, not assumed.
+So "stocks went up more than they went down" is true. But persistence
+accuracy under an i.i.d.-returns assumption is `p² + (1-p)²`, a function
+that is **quadratically insensitive to drift near p=0.5**: even a real
+5-point drift (p=0.55) only predicts ~50.4% persistence accuracy, nowhere
+near 55%. On top of that, this project's own signal investigation
+(`scripts/investigate_finance_signal.py`) already found real *negative*
+lag-1 autocorrelation (short-term reversal) for 4 of 6 tickers — which
+works directly against persistence, suppressing it further. Measured
+directly on the actual time-ordered val split used throughout this
+experiment:
+
+| Baseline | Mean accuracy (val split) |
+|---|---|
+| Persistence | 52.0% |
+| **Majority-class** | **56.3%** |
+
+The majority-class baseline is not subject to either suppression effect
+and is meaningfully stronger here. A model beating persistence but not
+majority-class has not demonstrated an edge — it may simply have learned
+to lean toward the majority class, which persistence itself fails to
+capture. Both are reported from here on; a result is only claimed as a
+real finding if it beats the **stronger** of the two.
+
+**Data preprocessing, with justification for each choice:**
+
+- **Quantile-bin discretization** (`ReturnTokenizer`, any `n_bins`): bin
+  edges are fit on train data only (never val), so tokenization itself
+  can't leak val-period statistics — a subtler leak than a bad train/val
+  split but just as real, and specifically tested for (see `scripts` /
+  `tests/test_finance_no_leakage.py`).
+- **Volatility scaling** (`volatility_scale()`, v2/v3 only): divides each
+  return by its trailing realized volatility (rolling `window=20`-day
+  std, strictly causal via `.rolling(window).std().shift(1)` — the shift
+  is what excludes the current day from its own scale estimate).
+  Standard preprocessing for heavy-tailed, heteroscedastic returns
+  ([volatility-derived features are commonly used inputs in recent
+  applied work](https://pmc.ncbi.nlm.nih.gov/articles/PMC11577217/);
+  GARCH-derived volatility as a neural-net input feature is an
+  established pattern in the forecasting literature) — checked against
+  current literature, not assumed.
+- **Binary vs. 8-bin target** (v1 vs. v2/v3): binary classification of
+  direction is standard practice for this exact task in recent
+  (2024-2025) applied deep learning work on stock direction prediction,
+  not fine-grained discretization ([Predicting daily stock price
+  directions with deep learning
+  models](https://www.sciencedirect.com/science/article/pii/S2666827025001276),
+  [Stock Market Prediction Using ML/DL: A
+  Review](https://www.mdpi.com/2673-9909/5/3/76)).
+- **Continuous input** (v3 only, `continuous_input=True`): a real-valued
+  linear projection instead of a token-embedding lookup for the input
+  side, while the output head stays a discrete classifier — see the v3
+  section below for why.
+- **Time-ordered, per-ticker train/val split**, never a random shuffle of
+  windows, and windows never cross a ticker boundary (unchanged across
+  all three versions) — the standard walk-forward discipline for
+  financial time series, avoiding the lookahead a random split would
+  introduce.
+
 ### Finance stretch results (v1): 8-bin discretization
 
 Same setup as the core experiment (4 optimizers x 9 LRs x 3 seeds = 108
 runs, 500 steps, same code path via the data factory, rerun against the
 corrected Nero). Raw results: `results/finance/sweep_results.csv`.
 Analysis: `analysis_finance.ipynb`, figures in `results/finance/*.png`.
+Directional-accuracy numbers below were recomputed against the corrected
+dual-baseline eval (see previous section) — the original run only ever
+needed retraining + re-evaluation, not a full sweep rerun.
 
 **First finding: there isn't enough learnable signal here for the
 basin-width comparison to mean anything, and that's reported as the
@@ -324,20 +422,21 @@ loss clusters within **1.5% of that baseline** across nearly the entire
 LR range (see `results/finance/loss_vs_lr.png` — note the y-axis range
 compared to the core experiment's version of the same plot).
 
-| Optimizer | Best LR | Model directional accuracy | Naive baseline | Brier score |
-|---|---|---|---|---|
-| AdamW | 9.5e-5 | 49.3% | 50.8% | 0.251 |
-| SGD | 0.30 | 50.2% | 50.8% | 0.251 |
-| Nero | 0.071 | 49.1% | 50.8% | 0.251 |
-| Muon | 6.3e-4 | 49.4% | 50.8% | 0.251 |
+| Optimizer | Best LR | Model directional accuracy | Persistence baseline | Majority baseline | Brier score |
+|---|---|---|---|---|---|
+| AdamW | 9.5e-5 | 49.3% | 50.8% | 53.3% | 0.251 |
+| SGD | 0.30 | 50.2% | 50.8% | 53.3% | 0.251 |
+| Nero | 0.071 | 49.1% | 50.8% | 53.3% | 0.251 |
+| Muon | 6.3e-4 | 49.4% | 50.8% | 53.3% | 0.251 |
 
-**None of the four optimizers beat the naive persistence baseline**
-(predict yesterday's direction repeats), and Brier scores (~0.25) are
-indistinguishable from a coin flip (a predictor that always outputs 50/50
-gets exactly 0.25 by construction). Taken at face value, the basin-width
-finding from the core experiment doesn't get a meaningful transfer test
-here — not because it failed to transfer, but because there wasn't
-enough of a loss landscape being fit for optimizer choice to matter.
+**None of the four optimizers beat either naive baseline** — all four sit
+below even the weaker persistence baseline, let alone the stronger
+majority-class one — and Brier scores (~0.25) are indistinguishable from
+a coin flip (a predictor that always outputs 50/50 gets exactly 0.25 by
+construction). Taken at face value, the basin-width finding from the
+core experiment doesn't get a meaningful transfer test here — not because
+it failed to transfer, but because there wasn't enough of a loss
+landscape being fit for optimizer choice to matter.
 
 **Second finding, and the more important one: that "no signal" reading
 turned out to be about the pipeline, not the data.** Prompted by how
@@ -414,30 +513,33 @@ objective was the likely culprit.
 | Data | `n_bins=2, vol_scale=True, vol_window=20, val_fraction=0.15`, same 6 tickers / 2015-2025 window as v1 |
 | Training | `batch_size=64, seq_len=64, max_steps=500` (flat LR, no schedule — the `use_cosine_schedule` feature added on `optimizer-extensions` hasn't been merged into this branch) |
 | Sweep | AdamW + Muon, same two 9-point LR grids as v1/`optimizer_extensions_sweep.yaml`, 3 seeds each = 54 runs, 0 diverged |
-| Metrics | validation cross-entropy vs. uniform baseline (`ln(2) ≈ 0.693` for `n_bins=2`, replacing v1's `ln(8) ≈ 2.079`); directional accuracy vs. naive persistence baseline; Brier score — same three metrics as v1, via `src/eval_finance.py`, unchanged |
+| Metrics | loss vs. `ln(2) ≈ 0.693` uniform baseline (replacing v1's `ln(8) ≈ 2.079`); directional accuracy vs. **both** naive baselines; Brier score — see the metrics section above |
 
-**Results — mixed, reported precisely rather than rounded to a single verdict:**
+**Results:**
 
-| Optimizer | Best LR | Best val loss | Gap below uniform | Model dir. accuracy | Naive baseline | Brier score |
-|---|---|---|---|---|---|---|
-| AdamW | 0.040 | 0.6916 | 0.23% | 47.9% | 50.7% | 0.251 |
-| **Muon** | 0.6325 | 0.6908 | 0.34% | **54.0%** | 50.7% | 0.249 |
+| Optimizer | Best LR | Best val loss | Gap below uniform | Model dir. accuracy | Persistence baseline | Majority baseline | Brier score |
+|---|---|---|---|---|---|---|---|
+| AdamW | 0.040 | 0.6916 | 0.23% | 47.9% | 50.7% | 54.0% | 0.251 |
+| Muon | 0.6325 | 0.6908 | 0.34% | 54.0% | 50.7% | 54.0% | 0.249 |
 
-Two things point in different directions, both real:
+**Revision, not just an update: the "genuine edge" claim in an earlier
+version of this section was wrong, and is retracted here rather than
+quietly edited away.** That version only compared against persistence
+(54.0% vs. 50.7%) and read Muon's result as a real, if modest, edge. Once
+the majority-class baseline was added (prompted by a review question
+about why the naive baseline sits so close to 50% despite real positive
+drift — see the metrics section above), the picture changes: **Muon's
+54.0% is not a beat, it is an exact tie with the majority-class
+baseline's 54.0%.** That is not a coincidence — it is the signature of a
+model that has learned to lean toward the majority class and nothing
+more (AdamW's 47.9%, below both baselines, is consistent with a model
+that hasn't even learned that much). Neither optimizer demonstrates a
+real directional edge in v2.
 
-1. **By loss, v2 found *less* structure than v1**, not more — the gap
-   below the uniform baseline shrank from v1's 1.3-1.4% to v2's 0.2-0.3%.
-2. **By directional accuracy, Muon shows a genuine edge for the first
-   time** — 54.0% vs. 50.7% naive, something no optimizer achieved in v1.
-   AdamW still doesn't (47.9%, below naive).
-
-This discrepancy between the two metrics is itself informative, not a
-contradiction to paper over: cross-entropy over 2 classes can stay close
-to `ln(2)` in aggregate while the model's predictions are still
-consistently, mildly directionally skewed in the right way — a small
-average log-loss improvement can still cross the 50% accuracy threshold
-correctly more often than not. Muon's result should be read as a real
-but modest signal, not as evidence the loss finding was wrong.
+**By loss, v2 also found *less* structure than v1** — the gap below the
+uniform baseline shrank from v1's 1.3-1.4% to v2's 0.2-0.3%, consistent
+with the corrected directional-accuracy picture rather than in tension
+with it, as an earlier version of this section framed it.
 
 **A likely confound, identified rather than glossed over:** switching to
 `n_bins=2` didn't just simplify the *target* — because input and target
@@ -451,13 +553,51 @@ matter" — the input representation changed too, in a way that plausibly
 works against the fix rather than for it. This is the most likely reason
 v2 doesn't show a bigger, cleaner improvement.
 
-**Planned v3 (not implemented in this version):** feed continuous
-(volatility-scaled) returns as real-valued input via a linear projection
-into the same transformer trunk, instead of a discrete token embedding
-lookup — keeping the binary classification *target* from v2, but fixing
-the input-binarization confound identified above. This isolates whether
-it's the *objective* (v1→v2's change) or the *input representation* (the
-confound) that matters more for closing the gap to the simple baseline.
+### Finance stretch results (v3): continuous input via linear projection
+
+Implements the v2 section's planned fix: feeds continuous (volatility-
+scaled) returns as real-valued input via `nn.Linear(1, d_model)`
+(`ModelConfig.continuous_input`), instead of a discrete token-embedding
+lookup, while the output head is unchanged (still classifies into
+`n_bins=2` discrete bins) — isolating whether it's the *objective*
+(v1→v2) or the *input representation* (the v2 confound) that matters
+more.
+
+**Setup, exactly** (`configs/finance_v3_sweep.yaml`,
+`results/finance/v3_sweep_results.csv`): identical to v2 —
+`d_model=128, n_layers=4, n_heads=4, mlp_ratio=4, max_seq_len=64`,
+`n_bins=2, vol_scale=True, vol_window=20`, AdamW + Muon, same two LR
+grids, 3 seeds, 500 steps — with `continuous_input=True` set on both
+`data` and `model`, and the target held at v2's binary classification.
+54 runs, 0 diverged.
+
+**Results:**
+
+| Optimizer | Best LR | Best val loss | Gap below uniform | Model dir. accuracy | Persistence baseline | Majority baseline | Brier score |
+|---|---|---|---|---|---|---|---|
+| AdamW | 0.0949 | 0.6908 | 0.33% | 47.3% | 50.8% | 54.0% | 0.250 |
+| Muon | 0.0474 | 0.6916 | 0.23% | 49.2% | 50.8% | 54.0% | 0.250 |
+
+**The fix did not help — if anything, v3 is slightly worse than v2.**
+Neither optimizer beats either baseline; both sit further below the
+majority-class baseline than v2's AdamW did, and v2's Muon (which at
+least tied the majority baseline) isn't matched by either v3 run. Loss
+is essentially unchanged from v2 (0.2-0.3% below uniform either way).
+
+**What this rules out, and what it doesn't.** The input-binarization
+confound was a real, identified mechanism — the model genuinely can no
+longer see move magnitude in discrete-input mode — but fixing it alone
+does not close the gap to the simple 5-lag logistic-regression baseline
+(56.4% mean test accuracy, from the v1 signal investigation). Plausible
+remaining explanations, none confirmed: 500 steps and a single scalar
+input per position may simply be too little signal/capacity for this
+tiny transformer to find what a 5-feature linear model finds easily; the
+binary cross-entropy objective, even with continuous input, may still be
+a harder optimization target than the logistic regression's directly-
+supervised setup; or the model needs the same longer-training-plus-
+schedule treatment the core experiment's optimizer comparison got (see
+`optimizer-extensions`' `use_cosine_schedule`, not yet merged into this
+branch — see the note in Limitations).
 
 ## Limitations
 
