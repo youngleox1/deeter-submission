@@ -20,6 +20,12 @@ class ModelConfig:
     mlp_ratio: int = 4
     dropout: float = 0.0
     layernorm_affine: bool = True
+    continuous_input: bool = False  # finance v3: linear-project a real-valued
+    # input (e.g. vol-scaled returns) instead of a token-embedding lookup,
+    # while the output head still classifies into discrete vocab_size bins
+    # (see forward()) -- isolates whether it's the objective or the input
+    # representation that matters more for the finance stretch's input-
+    # binarization confound (see README, finance v2 section).
 
 
 class CausalSelfAttention(nn.Module):
@@ -73,16 +79,22 @@ class Block(nn.Module):
 class DecoderOnlyTransformer(nn.Module):
     """Sequence model used for both experiments.
 
-    Core (text): outputs next-token logits over a vocabulary.
-    Finance stretch: same trunk, swap `head` for a small regression/
-    classification head (see configs/finance_*.yaml) instead of a token
-    vocabulary — the trunk and optimizer code are shared unchanged.
+    Core (text): outputs next-token logits over a vocabulary, discrete
+    token-id input via embedding lookup.
+    Finance stretch: same trunk and output head (still classifies into
+    discrete vocab_size bins). Input is either discrete token ids (v1/v2,
+    `continuous_input=False`, embedding lookup) or real-valued (v3,
+    `continuous_input=True`, linear projection of a raw scalar per
+    position) -- see ModelConfig.continuous_input.
     """
 
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.cfg = cfg
-        self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
+        if cfg.continuous_input:
+            self.input_proj = nn.Linear(1, cfg.d_model)
+        else:
+            self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.pos_emb = nn.Embedding(cfg.max_seq_len, cfg.d_model)
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layers)])
         self.ln_f = nn.LayerNorm(cfg.d_model, elementwise_affine=cfg.layernorm_affine)
@@ -92,7 +104,10 @@ class DecoderOnlyTransformer(nn.Module):
         b, t = idx.shape
         assert t <= self.cfg.max_seq_len, "sequence longer than max_seq_len"
         pos = torch.arange(t, device=idx.device)
-        x = self.tok_emb(idx) + self.pos_emb(pos)[None, :, :]
+        if self.cfg.continuous_input:
+            x = self.input_proj(idx.float().unsqueeze(-1)) + self.pos_emb(pos)[None, :, :]
+        else:
+            x = self.tok_emb(idx) + self.pos_emb(pos)[None, :, :]
         for block in self.blocks:
             x = block(x)
         x = self.ln_f(x)

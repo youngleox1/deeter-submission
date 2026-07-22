@@ -13,9 +13,10 @@ class _FakeData:
     """Returns a fixed, hand-picked (x, y) batch regardless of args, so the
     expected accuracy/Brier numbers can be computed by hand.
     """
-    def __init__(self, x, y, bin_mean_return):
+    def __init__(self, x, y, bin_mean_return, continuous_input=False):
         self._x, self._y = x, y
         self.tokenizer = _FakeTokenizer(bin_mean_return)
+        self.continuous_input = continuous_input
 
     def get_batch(self, split, batch_size, seq_len, device="cpu"):
         return self._x, self._y
@@ -57,3 +58,23 @@ def test_directional_accuracy_and_brier_hand_computed_case():
     # model is near-certain and correct both times -> Brier near 0
     assert result["brier_score"] < 0.01
     assert result["n_predictions"] == 2
+
+
+def test_continuous_input_naive_baseline_uses_sign_of_x_not_lookup():
+    """Regression test: x is a real-valued return in continuous_input mode,
+    not a bin id -- indexing direction_lookup[x] (the discrete-mode path)
+    would be wrong (or crash). Naive direction must be sign(x) directly.
+    """
+    bin_mean_return = np.array([-0.02, -0.01, 0.01, 0.02])
+    x = torch.tensor([[-0.015, 0.03]])  # continuous: negative, positive
+    y = torch.tensor([[2, 2]])  # actual (discrete): pos, pos
+
+    data = _FakeData(x, y, bin_mean_return, continuous_input=True)
+    model = _FakeModel(always_predict_bin=2, vocab_size=4)
+
+    result = evaluate_directional_metrics(
+        model, data, batch_size=1, seq_len=2, n_eval_batches=1, device="cpu"
+    )
+
+    # naive = sign(x) = [neg, pos]; actual = [pos, pos] -> [wrong, correct] = 0.5
+    assert abs(result["naive_directional_accuracy"] - 0.5) < 1e-9

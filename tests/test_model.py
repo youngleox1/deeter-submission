@@ -93,3 +93,58 @@ def test_layernorm_affine_false_removes_ln_params_and_still_runs():
     _, loss = model(idx, targets)
     assert torch.isfinite(loss)
     loss.backward()
+
+
+def test_continuous_input_uses_linear_projection_not_embedding():
+    """Finance v3: real-valued input (e.g. vol-scaled returns) via a
+    linear projection, while the output head still classifies into
+    discrete vocab_size bins -- only the INPUT side changes.
+    """
+    cfg = _tiny_cfg()
+    cfg.continuous_input = True
+    model = DecoderOnlyTransformer(cfg)
+
+    assert not hasattr(model, "tok_emb")
+    assert hasattr(model, "input_proj")
+    assert isinstance(model.input_proj, torch.nn.Linear)
+    assert model.input_proj.in_features == 1
+    assert model.input_proj.out_features == cfg.d_model
+    # output head is unchanged: still a discrete classifier over vocab_size
+    assert model.head.out_features == cfg.vocab_size
+
+
+def test_continuous_input_forward_and_backward_run():
+    cfg = _tiny_cfg()
+    cfg.continuous_input = True
+    model = DecoderOnlyTransformer(cfg)
+
+    idx = torch.randn(3, cfg.max_seq_len)  # real-valued, NOT token ids
+    targets = torch.randint(0, cfg.vocab_size, (3, cfg.max_seq_len))  # still discrete
+    logits, loss = model(idx, targets)
+
+    assert logits.shape == (3, cfg.max_seq_len, cfg.vocab_size)
+    assert torch.isfinite(loss)
+    loss.backward()
+    grads = [p.grad for p in model.parameters() if p.requires_grad]
+    assert all(g is not None for g in grads)
+    assert all(torch.isfinite(g).all() for g in grads)
+
+
+def test_continuous_input_different_values_give_different_logits():
+    """Sanity: the linear projection must actually be sensitive to the
+    input's real value, not silently ignoring it (e.g. via a shape bug
+    that broadcasts away the real content).
+    """
+    cfg = _tiny_cfg()
+    cfg.continuous_input = True
+    model = DecoderOnlyTransformer(cfg)
+    model.eval()
+
+    idx_a = torch.zeros(1, cfg.max_seq_len)
+    idx_b = torch.ones(1, cfg.max_seq_len) * 5.0
+
+    with torch.no_grad():
+        logits_a, _ = model(idx_a)
+        logits_b, _ = model(idx_b)
+
+    assert not torch.allclose(logits_a, logits_b)

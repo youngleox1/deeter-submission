@@ -26,6 +26,7 @@ def evaluate_directional_metrics(
         np.sign(tokenizer.bin_mean_return), device=device, dtype=torch.float32
     )
     positive_mask = direction_lookup > 0
+    continuous_input = getattr(data, "continuous_input", False)
 
     n_correct_model = 0
     n_correct_naive = 0
@@ -40,7 +41,14 @@ def evaluate_directional_metrics(
 
         pred_dir = direction_lookup[pred_bin]
         actual_dir = direction_lookup[y]
-        naive_dir = direction_lookup[x]  # persistence: predict yesterday's direction repeats
+        if continuous_input:
+            # x is a real-valued return, not a bin id -- its own sign IS
+            # the naive "yesterday's direction repeats" prediction, no
+            # lookup table needed (and none is valid: direction_lookup is
+            # indexed by discrete bin id, x here is a float).
+            naive_dir = torch.sign(x)
+        else:
+            naive_dir = direction_lookup[x]  # persistence: predict yesterday's direction repeats
 
         n_correct_model += (pred_dir == actual_dir).sum().item()
         n_correct_naive += (naive_dir == actual_dir).sum().item()

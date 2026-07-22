@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from src.data import finance as finance_module
 from src.data.finance import FinanceReturns, ReturnTokenizer, volatility_scale
@@ -130,3 +131,32 @@ def test_finance_returns_with_vol_scale_runs_end_to_end(monkeypatch):
     x, y = ds.get_batch("train", batch_size=4, seq_len=10)
     assert x.shape == (4, 10)
     assert ds.vocab_size == 2
+
+
+def test_continuous_input_x_is_float_and_matches_tokenizer_input(monkeypatch):
+    """The defining correctness property of continuous_input mode: x must
+    be the real continuous return values, aligned to the exact same
+    (ticker, day) positions y's discrete bins come from. Verified by
+    comparing against an identically-seeded discrete-mode loader: since
+    both draw the same random (ticker, start) pairs, re-tokenizing
+    continuous x must reproduce discrete x exactly, and y must be
+    unaffected by continuous_input either way.
+    """
+    _patch_fetch(monkeypatch, {
+        "FAKE1": _make_fake_close_series(n=300, seed=7),
+        "FAKE2": _make_fake_close_series(n=300, seed=8),
+    })
+    ds = FinanceReturns(tickers=["FAKE1", "FAKE2"], val_fraction=0.2, n_bins=4,
+                         continuous_input=True, seed=0)
+    x, y = ds.get_batch("train", batch_size=8, seq_len=15)
+    assert x.dtype == torch.float32
+    assert y.dtype == torch.long
+    assert not torch.allclose(x, x.round())  # genuinely continuous, not integer-valued
+
+    ds_discrete = FinanceReturns(tickers=["FAKE1", "FAKE2"], val_fraction=0.2, n_bins=4,
+                                  continuous_input=False, seed=0)
+    x_discrete, y_discrete = ds_discrete.get_batch("train", batch_size=8, seq_len=15)
+
+    retokenized_x = torch.tensor(ds.tokenizer.transform(x.numpy().ravel())).view(x.shape)
+    assert torch.equal(retokenized_x, x_discrete)
+    assert torch.equal(y, y_discrete)  # y is unaffected by continuous_input, as designed

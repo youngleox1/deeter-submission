@@ -125,9 +125,11 @@ class FinanceReturns:
     def __init__(self, tickers: Optional[List[str]] = None, start: str = DEFAULT_START,
                  end: str = DEFAULT_END, n_bins: int = 8, val_fraction: float = 0.15,
                  seed: int = 0, cache_dir: Path = _CACHE_DIR,
-                 vol_scale: bool = False, vol_window: int = 20):
+                 vol_scale: bool = False, vol_window: int = 20,
+                 continuous_input: bool = False):
         self.tickers = tickers or DEFAULT_TICKERS
         self.vol_scale = vol_scale
+        self.continuous_input = continuous_input
 
         raw_returns = []
         for ticker in self.tickers:
@@ -152,22 +154,44 @@ class FinanceReturns:
             torch.tensor(self.tokenizer.transform(r[s:]), dtype=torch.long)
             for r, s in zip(raw_returns, split_points) if len(r) - s > 0
         ]
+        # continuous (untokenized) streams, built from the exact same per-
+        # ticker slices/filter as the discrete streams above, so index i in
+        # train_continuous_streams always corresponds to the exact same
+        # ticker/days as index i in train_streams (needed so x and y stay
+        # aligned when continuous_input=True pulls x from one and y from
+        # the other).
+        self.train_continuous_streams = [
+            torch.tensor(r[:s], dtype=torch.float32)
+            for r, s in zip(raw_returns, split_points) if s > 0
+        ]
+        self.val_continuous_streams = [
+            torch.tensor(r[s:], dtype=torch.float32)
+            for r, s in zip(raw_returns, split_points) if len(r) - s > 0
+        ]
         self._generator = torch.Generator().manual_seed(seed)
 
     def get_batch(self, split: str, batch_size: int, seq_len: int, device="cpu"):
-        streams = self.train_streams if split == "train" else self.val_streams
-        eligible = [s for s in streams if len(s) > seq_len + 1]
-        if not eligible:
+        discrete_streams = self.train_streams if split == "train" else self.val_streams
+        continuous_streams = (self.train_continuous_streams if split == "train"
+                               else self.val_continuous_streams)
+        eligible_idx = [i for i, s in enumerate(discrete_streams) if len(s) > seq_len + 1]
+        if not eligible_idx:
             raise ValueError(f"no '{split}' ticker stream long enough for seq_len={seq_len}")
 
         xs, ys = [], []
         for _ in range(batch_size):
-            stream_idx = torch.randint(0, len(eligible), (1,), generator=self._generator).item()
-            stream = eligible[stream_idx]
-            max_start = len(stream) - seq_len - 1
+            stream_idx = eligible_idx[
+                torch.randint(0, len(eligible_idx), (1,), generator=self._generator).item()
+            ]
+            discrete_stream = discrete_streams[stream_idx]
+            max_start = len(discrete_stream) - seq_len - 1
             start = torch.randint(0, max_start, (1,), generator=self._generator).item()
-            xs.append(stream[start: start + seq_len])
-            ys.append(stream[start + 1: start + seq_len + 1])
+
+            if self.continuous_input:
+                xs.append(continuous_streams[stream_idx][start: start + seq_len])
+            else:
+                xs.append(discrete_stream[start: start + seq_len])
+            ys.append(discrete_stream[start + 1: start + seq_len + 1])
 
         x = torch.stack(xs).to(device)
         y = torch.stack(ys).to(device)
