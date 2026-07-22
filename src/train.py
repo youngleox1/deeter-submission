@@ -16,7 +16,10 @@ from typing import Any, Dict, Optional
 import torch
 import yaml
 
+from src.lr_schedule import cosine_warmup_multiplier
 from src.optimizers import build_optimizer
+
+_LR_LIKE_KEYS = ("lr", "adamw_lr")  # every LR-ish key used across this repo's optimizers
 
 
 def resolve_device(device: str) -> str:
@@ -41,6 +44,9 @@ class TrainConfig:
     device: str = "cpu"
     divergence_threshold: float = 1e4
     optimizer_kwargs: Dict[str, Any] = field(default_factory=dict)
+    use_cosine_schedule: bool = False  # default off -- preserves every prior result's flat-LR behavior exactly
+    warmup_steps: int = 0
+    min_lr_ratio: float = 0.1
 
 
 @torch.no_grad()
@@ -60,14 +66,25 @@ def train_one_run(model: torch.nn.Module, data, cfg: TrainConfig) -> Dict[str, A
     model.to(cfg.device)
     model.train()
     optimizer = build_optimizer(cfg.optimizer_name, model, lr=cfg.lr, **cfg.optimizer_kwargs)
+    base_lrs = [{k: g[k] for k in _LR_LIKE_KEYS if k in g} for g in optimizer.param_groups]
 
     val_loss_history = []
     grad_norm_history = []
+    lr_history = []
     diverged = False
     steps_completed = 0
     start = time.time()
 
     for step in range(1, cfg.max_steps + 1):
+        if cfg.use_cosine_schedule:
+            multiplier = cosine_warmup_multiplier(
+                step, cfg.max_steps, cfg.warmup_steps, cfg.min_lr_ratio
+            )
+            for group, base in zip(optimizer.param_groups, base_lrs):
+                for k, v in base.items():
+                    group[k] = v * multiplier
+        lr_history.append(optimizer.param_groups[0].get("lr"))
+
         x, y = data.get_batch("train", cfg.batch_size, cfg.seq_len, cfg.device)
         optimizer.zero_grad()
         _, loss = model(x, y)
@@ -101,6 +118,7 @@ def train_one_run(model: torch.nn.Module, data, cfg: TrainConfig) -> Dict[str, A
         "best_val_loss": min((h["val_loss"] for h in val_loss_history), default=float("inf")),
         "final_val_loss": val_loss_history[-1]["val_loss"] if val_loss_history else float("inf"),
         "grad_norm_history": grad_norm_history,
+        "lr_history": lr_history,
         "wall_clock_seconds": time.time() - start,
     }
 

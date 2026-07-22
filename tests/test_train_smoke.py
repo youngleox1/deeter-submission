@@ -51,3 +51,38 @@ def test_train_detects_divergence_and_stops_early():
 
     assert result["diverged"] is True
     assert result["steps_completed"] < cfg.max_steps
+
+
+def test_cosine_schedule_disabled_by_default_keeps_lr_flat():
+    """Backward-compatibility guard: every prior sweep's results assumed a
+    flat LR. use_cosine_schedule defaults to False, so this must hold
+    unless a config explicitly opts in.
+    """
+    model, data = _tiny_model_and_data()
+    cfg = TrainConfig(
+        optimizer_name="adamw", lr=3e-3, batch_size=8, seq_len=16,
+        max_steps=20, eval_interval=10, eval_iters=2, seed=0, device="cpu",
+    )
+    result = train_one_run(model, data, cfg)
+
+    assert all(lr == 3e-3 for lr in result["lr_history"])
+
+
+def test_cosine_schedule_enabled_follows_warmup_then_decay():
+    model, data = _tiny_model_and_data()
+    peak_lr = 3e-3
+    cfg = TrainConfig(
+        optimizer_name="adamw", lr=peak_lr, batch_size=8, seq_len=16,
+        max_steps=20, eval_interval=10, eval_iters=2, seed=0, device="cpu",
+        use_cosine_schedule=True, warmup_steps=5, min_lr_ratio=0.1,
+    )
+    result = train_one_run(model, data, cfg)
+    lrs = result["lr_history"]
+
+    assert len(lrs) == 20
+    # warmup: step 1 -> peak/5, ramping up to step 5 -> peak
+    assert abs(lrs[0] - peak_lr / 5) < 1e-9
+    assert abs(lrs[4] - peak_lr) < 1e-9
+    # decay phase: strictly decreasing after warmup, ending above the floor
+    assert lrs[4] > lrs[10] > lrs[19]
+    assert lrs[19] >= peak_lr * 0.1 - 1e-9
