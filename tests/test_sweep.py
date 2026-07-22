@@ -70,3 +70,11 @@ def test_finance_sweep_yaml_has_expected_structure():
 
 def test_finance_v2_sweep_yaml_has_expected_structure():
     _assert_sweep_config_structure("configs/finance_v2_sweep.yaml", {"adamw", "muon"})
+
+
+def test_finance_v3_sweep_yaml_has_expected_structure_and_continuous_input():
+    _assert_sweep_config_structure("configs/finance_v3_sweep.yaml", {"adamw", "muon"})
+    with open("configs/finance_v3_sweep.yaml") as f:
+        config = yaml.safe_load(f)
+    assert config["data"]["continuous_input"] is True
+    assert config["model"]["continuous_input"] is True
