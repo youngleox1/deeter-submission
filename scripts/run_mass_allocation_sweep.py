@@ -10,7 +10,10 @@ optimizer; hidden_mass is a different axis entirely, so this is a small,
 dedicated script reusing train_one_run directly.
 """
 import csv
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data.text import TinyShakespeare
 from src.model import DecoderOnlyTransformer, ModelConfig
