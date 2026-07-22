@@ -146,6 +146,15 @@ class FinanceReturns:
         self.tokenizer = ReturnTokenizer(n_bins=n_bins).fit(train_returns_concat)
         self.vocab_size = self.tokenizer.vocab_size
 
+        # Majority-class direction, fit on TRAIN raw returns directly (not
+        # via the tokenizer): quantile binning forces an exact 50/50 split
+        # by construction at n_bins=2, which discards the marginal P(up)
+        # information a majority-vote baseline needs -- computed here from
+        # the actual sign distribution instead.
+        self.majority_direction_train = (
+            1.0 if (train_returns_concat > 0).mean() > 0.5 else -1.0
+        )
+
         self.train_streams = [
             torch.tensor(self.tokenizer.transform(r[:s]), dtype=torch.long)
             for r, s in zip(raw_returns, split_points) if s > 0

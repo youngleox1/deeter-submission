@@ -160,3 +160,34 @@ def test_continuous_input_x_is_float_and_matches_tokenizer_input(monkeypatch):
     retokenized_x = torch.tensor(ds.tokenizer.transform(x.numpy().ravel())).view(x.shape)
     assert torch.equal(retokenized_x, x_discrete)
     assert torch.equal(y, y_discrete)  # y is unaffected by continuous_input, as designed
+
+
+def test_majority_direction_train_matches_hand_computed_sign_distribution(monkeypatch):
+    """majority_direction_train must reflect the actual majority sign of
+    TRAIN raw returns -- not something derived from the tokenizer's bins.
+    A moderate positive skew (57% up days, realistic in magnitude, unlike
+    real market data's ~52-55%) still leaves the median near zero, so
+    quantile bins still straddle it -- confirming majority_direction_train
+    tracks the true marginal even when it's NOT recoverable from bin
+    structure alone (bin counts are forced to exactly 50/50 by
+    construction regardless of the marginal).
+    """
+    rng = np.random.RandomState(0)
+    n = 200
+    log_rets = rng.normal(0, 0.01, size=n)
+    up_idx = rng.choice(n, size=int(n * 0.57), replace=False)
+    log_rets[up_idx] = abs(log_rets[up_idx]) + 1e-5  # force these up, keep magnitudes modest
+
+    price = 100 * np.exp(np.cumsum(log_rets))
+    dates = pd.date_range("2020-01-01", periods=n + 1, freq="B")
+    close = pd.Series(np.concatenate([[100.0], price]), index=dates, name="Close")
+
+    _patch_fetch(monkeypatch, {"FAKE1": close})
+    ds = FinanceReturns(tickers=["FAKE1"], val_fraction=0.2, n_bins=2)
+
+    assert ds.majority_direction_train == 1.0
+    # both quantile bins are ~50% of train BY CONSTRUCTION regardless of
+    # the 57/43 true marginal -- majority_direction_train is not derivable
+    # from this bin-count structure, which is exactly the point.
+    assert (ds.tokenizer.bin_mean_return > 0).sum() == 1
+    assert (ds.tokenizer.bin_mean_return < 0).sum() == 1
