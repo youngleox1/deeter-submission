@@ -174,6 +174,12 @@ basin-width/divergence-rate findings transfer out of domain.
 - You, Y. et al. "Large Batch Optimization for Deep Learning: Training BERT
   in 76 Minutes." ICLR 2020. (LAMB — related method, not included; see
   Optimizer candidates above.)
+- "Predicting daily stock price directions with deep learning models."
+  ScienceDirect, 2025. (Literature check behind the v2 finance stretch's
+  switch to binary direction classification.)
+- "Stock Market Prediction Using Machine Learning and Deep Learning
+  Techniques: A Review." MDPI, 2024. (Same, plus confirms volatility/
+  technical-indicator features as standard practice.)
 
 ## Data
 
@@ -302,7 +308,7 @@ opposite direction from the original hypothesis. Reported as a
 tested-and-not-confirmed hypothesis with a genuine, unanticipated
 secondary finding, not retro-fitted into either story after the fact.
 
-### Finance stretch results
+### Finance stretch results (v1): 8-bin discretization
 
 Same setup as the core experiment (4 optimizers x 9 LRs x 3 seeds = 108
 runs, 500 steps, same code path via the data factory, rerun against the
@@ -365,6 +371,93 @@ An unexplored, clearly-labeled follow-up (not attempted here, due to
 time): swap the 8-way bin cross-entropy objective for a direct binary
 up/down classification head on the same transformer trunk, to test
 whether that alone closes the gap to the simple logistic baseline.
+
+### Finance stretch results (v2): binary direction + volatility scaling
+
+Follow-up on the v1 follow-up above, motivated by two things: a literature
+check on common practice for neural direction-prediction (not just
+assumption — see citations below), and v1's own diagnosis that the 8-bin
+objective was the likely culprit.
+
+**What changed from v1, precisely:**
+
+- **Objective: `n_bins` 8 → 2.** No new code needed — `ReturnTokenizer`
+  already supports arbitrary bin counts via quantile binning, so `n_bins=2`
+  is a plain binary up/down split at the median. Literature check: binary
+  classification of direction is standard practice for this exact task in
+  recent (2024-2025) applied deep learning work on stock direction
+  prediction, not fine-grained discretization ([Predicting daily stock
+  price directions with deep learning
+  models](https://www.sciencedirect.com/science/article/pii/S2666827025001276),
+  [Stock Market Prediction Using ML/DL: A
+  Review](https://www.mdpi.com/2673-9909/5/3/76)).
+- **Preprocessing: volatility scaling added** (`src/data/finance.py`'s new
+  `volatility_scale()`). Each return is divided by its trailing realized
+  volatility (rolling `window=20`-day std, strictly causal — computed via
+  `.rolling(window).std().shift(1)`, where the shift is what excludes the
+  current day from its own scale estimate) before tokenization. Standard
+  preprocessing for heavy-tailed, heteroscedastic returns
+  ([volatility-derived features are commonly used inputs in recent applied
+  work](https://pmc.ncbi.nlm.nih.gov/articles/PMC11577217/); GARCH-derived
+  volatility as a neural-net input feature is an established pattern in
+  the forecasting literature).
+- **Optimizer comparison narrowed to AdamW + Muon** (SGD and Nero dropped
+  for this revision, per explicit request — not because v1 found them
+  irrelevant).
+
+**Setup, exactly** (`configs/finance_v2_sweep.yaml`,
+`results/finance/v2_sweep_results.csv`):
+
+| | Value |
+|---|---|
+| Model | same `DecoderOnlyTransformer`: `d_model=128, n_layers=4, n_heads=4, mlp_ratio=4, max_seq_len=64` |
+| Data | `n_bins=2, vol_scale=True, vol_window=20, val_fraction=0.15`, same 6 tickers / 2015-2025 window as v1 |
+| Training | `batch_size=64, seq_len=64, max_steps=500` (flat LR, no schedule — the `use_cosine_schedule` feature added on `optimizer-extensions` hasn't been merged into this branch) |
+| Sweep | AdamW + Muon, same two 9-point LR grids as v1/`optimizer_extensions_sweep.yaml`, 3 seeds each = 54 runs, 0 diverged |
+| Metrics | validation cross-entropy vs. uniform baseline (`ln(2) ≈ 0.693` for `n_bins=2`, replacing v1's `ln(8) ≈ 2.079`); directional accuracy vs. naive persistence baseline; Brier score — same three metrics as v1, via `src/eval_finance.py`, unchanged |
+
+**Results — mixed, reported precisely rather than rounded to a single verdict:**
+
+| Optimizer | Best LR | Best val loss | Gap below uniform | Model dir. accuracy | Naive baseline | Brier score |
+|---|---|---|---|---|---|---|
+| AdamW | 0.040 | 0.6916 | 0.23% | 47.9% | 50.7% | 0.251 |
+| **Muon** | 0.6325 | 0.6908 | 0.34% | **54.0%** | 50.7% | 0.249 |
+
+Two things point in different directions, both real:
+
+1. **By loss, v2 found *less* structure than v1**, not more — the gap
+   below the uniform baseline shrank from v1's 1.3-1.4% to v2's 0.2-0.3%.
+2. **By directional accuracy, Muon shows a genuine edge for the first
+   time** — 54.0% vs. 50.7% naive, something no optimizer achieved in v1.
+   AdamW still doesn't (47.9%, below naive).
+
+This discrepancy between the two metrics is itself informative, not a
+contradiction to paper over: cross-entropy over 2 classes can stay close
+to `ln(2)` in aggregate while the model's predictions are still
+consistently, mildly directionally skewed in the right way — a small
+average log-loss improvement can still cross the 50% accuracy threshold
+correctly more often than not. Muon's result should be read as a real
+but modest signal, not as evidence the loss finding was wrong.
+
+**A likely confound, identified rather than glossed over:** switching to
+`n_bins=2` didn't just simplify the *target* — because input and target
+tokens come from the same tokenized stream in this next-token-prediction
+setup, it also binarized the model's *input*. The model can now only see
+whether each historical day was up or down, never the *magnitude* of the
+move — exactly the information the simple 5-lag logistic-regression
+baseline (which used raw continuous returns as features) still has full
+access to. So v1-vs-v2 isn't a clean test of "does the objective alone
+matter" — the input representation changed too, in a way that plausibly
+works against the fix rather than for it. This is the most likely reason
+v2 doesn't show a bigger, cleaner improvement.
+
+**Planned v3 (not implemented in this version):** feed continuous
+(volatility-scaled) returns as real-valued input via a linear projection
+into the same transformer trunk, instead of a discrete token embedding
+lookup — keeping the binary classification *target* from v2, but fixing
+the input-binarization confound identified above. This isolates whether
+it's the *objective* (v1→v2's change) or the *input representation* (the
+confound) that matters more for closing the gap to the simple baseline.
 
 ## Limitations
 
