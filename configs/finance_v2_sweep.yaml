@@ -1,0 +1,54 @@
+# Revision of the finance stretch experiment, motivated by (1) literature
+# on common practice for neural direction-prediction (binary up/down
+# classification, not fine-grained discretization) and (2) this project's
+# own diagnosis that the original 8-bin + cross-entropy setup likely
+# swamped a weak signal a simple 5-lag logistic regression finds easily
+# (see scripts/investigate_finance_signal.py). Kept as a SEPARATE config/
+# output from configs/finance_sweep.yaml -- the original results aren't
+# rerun, just superseded by a second, better-motivated attempt.
+#
+# Changes from finance_sweep.yaml: n_bins 8 -> 2 (binary direction),
+# vol_scale enabled (divide returns by trailing realized vol before
+# tokenizing), optimizer comparison narrowed to AdamW + Muon only.
+
+output_csv: results/finance/v2_sweep_results.csv
+
+data:
+  type: finance
+  n_bins: 2
+  val_fraction: 0.15
+  vol_scale: true
+  vol_window: 20
+  # tickers / date range use FinanceReturns defaults, see src/data/finance.py
+
+model:
+  max_seq_len: 64
+  d_model: 128
+  n_layers: 4
+  n_heads: 4
+  mlp_ratio: 4
+  dropout: 0.0
+
+train:
+  batch_size: 64
+  seq_len: 64
+  max_steps: 500
+  eval_interval: 100
+  eval_iters: 20
+  divergence_threshold: 10000.0
+  device: auto
+
+sweep:
+  seeds: [0, 1, 2]
+
+  lr_grids:
+    adamw: [9.487e-5, 2.276e-4, 5.335e-4, 1.265e-3, 3.000e-3, 7.114e-3, 1.687e-2, 4.000e-2, 9.487e-2]
+    muon:  [6.325e-4, 1.517e-3, 3.557e-3, 8.434e-3, 2.000e-2, 4.743e-2, 1.125e-1, 2.667e-1, 6.325e-1]
+
+  optimizer_kwargs:
+    adamw:
+      betas: [0.9, 0.95]
+      weight_decay: 0.0
+    muon:
+      momentum: 0.95
+      adamw_lr: 3.0e-3
