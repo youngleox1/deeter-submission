@@ -34,6 +34,7 @@
 - [How to run](#how-to-run)
 - [Results](#results)
   - [Core experiment results](#core-experiment-results)
+  - [Follow-up: schedule and longer training](#follow-up-cosine-warmup-schedule-and-longer-training)
   - [Ablation: LayerNorm affine params](#ablation-does-removing-layernorms-affine-params-help-nero)
   - [Finance stretch results](#finance-stretch-results)
 - [Limitations](#limitations) *(folded)*
@@ -311,11 +312,15 @@ Two separate findings, not one clean story:
    this metric regardless of implementation correctness. This is a genuine
    negative result, not a bug (Nero's tests now check the correct
    invariants — unit-norm + mean-zero per neuron after construction and
-   after every step — and all pass). Plausible explanations for the
-   remaining gap, none confirmed: no LR warmup/schedule is used here, and
-   Nero's reported benefits may show up more at larger scale or longer
-   training than this 500-step toy setting. Reported as an open question,
-   not explained away.
+   after every step — and all pass). Two plausible explanations were raised
+   for the remaining gap — no LR warmup/schedule, and the 500-step horizon
+   being too short — and both are tested directly in
+   [Follow-up](#follow-up-cosine-warmup-schedule-and-longer-training) below:
+   a schedule helps Nero more than the other three but doesn't close the
+   gap, and longer training compresses the overall spread but doesn't
+   rescue Nero's relative standing either (SGD overtakes it at 3000 steps).
+   The gap remains a genuine, still-open question after both explanations
+   were checked, not explained away.
 
 **Divergence rate:** SGD is the only optimizer that diverges anywhere in its
 sampled grid (all 3 seeds, for every LR ≥ 0.71 — see
@@ -325,6 +330,83 @@ architecture-aware motivation: it cleanly separates SGD from the other
 three, but AdamW (not architecture-aware, by this project's definition)
 also never diverges — so divergence avoidance alone doesn't cleanly
 distinguish "architecture-aware" from "not" in this experiment.
+
+### Follow-up: cosine-warmup schedule and longer training
+
+Two limitations flagged in the original writeup (see Limitations) — no LR
+schedule anywhere, and 500 steps being short — were each named as a
+candidate explanation for Nero's underperformance above. Both are tested
+directly here, one variable at a time, per the exact follow-ups already
+proposed in Limitations: a same-grid schedule ablation, and a longer-training
+check on each optimizer's own top-3 short-horizon LRs.
+
+**Setup A — schedule ablation** (`configs/core_sweep_schedule_ablation.yaml`,
+`results/core/schedule_ablation_results.csv`): identical to the core sweep
+(same model, same 9-LR x4-optimizer x3-seed grid, still 500 steps) with
+`use_cosine_schedule=True, warmup_steps=50` (10% linear warmup, cosine decay
+to 10% of peak LR) — the one variable changed, so any difference is
+attributable to the schedule and not a confound with more training.
+
+| Optimizer | Own best (flat) | Own best (schedule) | Best LR (flat → schedule) | Diverged (flat → schedule) |
+|---|---|---|---|---|
+| AdamW | 1.718 | 1.695 | 0.0071 → 0.0071 (unchanged) | 0/27 → 0/27 |
+| **Nero** | 2.058 | **1.939** | 0.03 → 0.071 (+1 grid step) | 0/27 → 0/27 |
+| Muon | 1.654 | 1.634 | 0.02 → 0.02 (unchanged) | 0/27 → 0/27 |
+| SGD | 2.170 | 2.105 | 0.3 → 0.71 (+1 grid step) | 12/27 → 9/27 |
+
+**The qualitative conclusion from the flat-LR core result is unchanged under
+the schedule** — recomputing the same basin-width table
+(`scripts/analyze_schedule_and_longer_training.py`) shows Muon still wins on
+both best loss and basin width at every tested X (5/10/20%), and SGD/Nero
+still never land within even the loosest (X=20%) tolerance of AdamW's best
+as anything more than a single, zero-width LR point. So the original
+finding was not an artifact of the missing schedule.
+
+**But there is a real secondary finding: the schedule helps Nero
+disproportionately.** Nero's best loss improves 5.8% (more than double
+AdamW's or Muon's ~1-1.5% improvement), and its optimal LR shifts a full
+grid step higher — consistent with the earlier LayerNorm-affine ablation's
+finding that Nero specifically struggles at high LR (warmup delays exposure
+to that regime; decay retreats from it before it destabilizes things). The
+same mechanism rescues one previously-diverging SGD grid point
+(lr≈0.71 no longer diverges, and becomes SGD's new best-LR). **Despite this,
+Nero's gap to AdamW and Muon does not close** — 1.939 is still meaningfully
+worse than AdamW's 1.695 — so the schedule explains part of, but not all of,
+Nero's underperformance. See `results/core/schedule_ablation_loss_vs_lr.png`
+for the flat-vs-schedule overlay.
+
+**Setup B — longer training** (`configs/core_longer_training_check.yaml`,
+`results/core/longer_training_results.csv`): each optimizer's own top-3 LRs
+from the 500-step sweep, rerun for 3000 steps (6x) at a flat LR (no
+schedule, to isolate step count from Setup A's variable) — the exact
+"longer-training check on the top 2-3 LRs per optimizer" Limitations
+proposed.
+
+| Rank @ 3000 steps | Optimizer | Best loss (3000 steps) | Best loss (500 steps) |
+|---|---|---|---|
+| 1 | Muon | 1.533 | 1.654 |
+| 2 | AdamW | 1.545 | 1.718 |
+| 3 | SGD | 1.577 | 2.170 |
+| 4 | Nero | 1.587 | 2.058 |
+
+**The overall spread compresses sharply with more training** (1.53-1.59 at
+3000 steps vs. 1.65-2.17 at 500 steps) — direct confirmation of the
+Limitations bullet's own prediction that the 500-step ranking reflects
+early-training behavior, not asymptotic quality. **But within that
+compression, SGD overtakes Nero** — reversing their relative order from the
+500-step result (Nero < SGD there; SGD < Nero here) — so longer training
+does not rescue Nero's relative standing, and by this narrow test actually
+worsens it (last place, not third). Muon and AdamW's 1st/2nd ranking is
+stable across both step counts.
+
+**Caveat, stated plainly rather than glossed over:** this only reruns each
+optimizer's own *500-step-optimal* top-3 LRs, not a fresh grid at 3000
+steps — it is not a full re-sweep. It's notable that at 3000 steps, Nero's
+second-best tested LR (0.01265) already clearly beats its 500-step-optimal
+LR (0.03) — 1.587 vs. 1.663 — which is a hint, not proof, that Nero's true
+long-horizon optimum may sit even lower than the narrow window tested here.
+A full re-sweep at 3000 steps is the natural next step to confirm or rule
+that out, not attempted here due to time.
 
 ### Ablation: does removing LayerNorm's affine params help Nero?
 
@@ -368,26 +450,28 @@ linear effect), not evidence of market efficiency.
 - **X% was not pre-registered in a config file before the core sweep ran**
   (see Core experiment results above for how this is handled: all three
   candidate values are reported, and the conclusion is stable across them).
-- **No LR schedule of any kind is used anywhere in this project** — every
-  run is a flat, constant LR for its full duration, no warmup, no decay.
-  This is a real limitation, not specific to any one optimizer: it likely
-  understates AdamW's usable LR range in particular (warmup commonly
-  prevents the kind of early instability that would show up here as poor
-  high-LR performance), and real-world Muon usage is essentially always
-  paired with a decay schedule, so testing it constant-LR-only is a
-  departure from how it's normally deployed. Raised during review; not
-  addressed in this submission due to time, but a natural next step would
-  be one additional ablation (single cosine+warmup config, same LR grid)
-  rather than expanding the main grid, to avoid reopening the same
-  "which schedule is fair to all four" problem X% already ran into.
+- **No LR schedule of any kind is used in the core sweep** — flat, constant
+  LR for its full duration, no warmup, no decay. **Addressed**: a same-grid
+  cosine-warmup ablation (see
+  [Follow-up](#follow-up-cosine-warmup-schedule-and-longer-training) above)
+  confirms the core ranking is not an artifact of this — Muon still wins on
+  both loss and basin width — but finds a real secondary effect: the
+  schedule disproportionately helps Nero (best loss improves 5.8%, vs.
+  ~1-1.5% for AdamW/Muon) and rescues one SGD divergence point, without
+  closing Nero's gap to AdamW or Muon.
 - **500 training steps is short** relative to typical conventions for this
   exact toy setup (e.g. nanoGPT's own char-level tiny-Shakespeare example
-  commonly trains several thousand steps). This means the core experiment's
-  ranking reflects early-training relative behavior, not asymptotic
-  quality — optimizers with fast early descent are structurally favored
-  over ones whose properties play out over a longer horizon. Not addressed
-  here due to time; a longer-training check on the top 2-3 LRs per
-  optimizer would be the natural follow-up.
+  commonly trains several thousand steps), meaning the core ranking risked
+  reflecting early-training behavior rather than asymptotic quality.
+  **Partially addressed**: a 3000-step (6x) rerun of each optimizer's own
+  top-3 500-step-optimal LRs (see
+  [Follow-up](#follow-up-cosine-warmup-schedule-and-longer-training) above)
+  confirms the spread compresses sharply with more training, as predicted —
+  but also finds SGD overtakes Nero at 3000 steps, reversing their 500-step
+  order, so longer training does not rescue Nero's relative standing. Only
+  a narrow, short-horizon-selected set of LRs was retested, not a fresh
+  grid, so this remains partial: Nero's true long-horizon-optimal LR may
+  lie outside the window tested (see the caveat in Follow-up above).
 - **Muon is a simplified, from-scratch reproduction**, not a verbatim port
   of a reference implementation. (Muon wasn't in any version of PyTorch
   when this was written — it was added as `torch.optim.Muon` in PyTorch
