@@ -13,13 +13,18 @@
   reimplementation bug was caught and fixed against the reference code —
   a genuine open question, not explained away. SGD is the only optimizer
   that diverges anywhere in its sampled range.
-- **Finance stretch:** the neural pipeline finds ~no signal (near
-  uniform-baseline loss, no directional edge over a naive baseline) — but
-  a simple 5-lag logistic regression on the *same data* clearly does
-  (beats naive on all 6 tickers). So the honest conclusion isn't "market
-  efficiency," it's "this pipeline's 8-bin discretization + cross-entropy
-  objective fails to extract a signal that demonstrably exists." See
-  [Branches](#branches) — that finding lives on `finance-stretch`.
+- **Finance stretch (this branch — incomplete):** the neural pipeline finds
+  ~no signal (near uniform-baseline loss, no directional edge over a naive
+  baseline) — but a simple 5-lag logistic regression on the *same data*
+  clearly does (beats naive on all 6 tickers). So the honest conclusion
+  isn't "market efficiency," it's "this pipeline's 8-bin discretization +
+  cross-entropy objective fails to extract a signal that demonstrably
+  exists." **Flagged incomplete because:** a later cosine-warmup-schedule +
+  longer-training fix, applied to the `master` branch's core text
+  experiment, substantially changed *that* experiment's headline
+  conclusion — see `master`'s README. The same fix was never tried here,
+  so it's an open question whether it would change this finding too (see
+  the Limitations section below for the specific untried fix).
 - Full navigation: [Table of contents](#table-of-contents).
 
 ## Table of contents
