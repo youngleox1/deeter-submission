@@ -14,12 +14,18 @@
   SGD is the only optimizer that diverges anywhere in its sampled range.
   **But this picture changes substantially under a "hero run"** (cosine
   schedule + 6x longer training, same full grid — see
+  [Results summary figure](#results) and
   [Follow-up](#follow-up-cosine-warmup-schedule-and-longer-training)): all
   four optimizers land within 4.2% of each other's best loss, AdamW's basin
-  width ties Muon's, and SGD's divergence range shrinks by half. Most of the
+  width ties Muon's (measured either relative to AdamW's best or to each
+  optimizer's own), and SGD's divergence range shrinks by half. Most of the
   original gap was closed by standard training hygiene, not
   architecture-awareness — reported as a genuine, load-bearing qualifier to
-  the headline above, not a footnote.
+  the headline above, not a footnote. One exception, itself unexplained:
+  **Nero's basin width around its *own* best is completely unchanged by the
+  fix** (0.375 log10 decades either way) despite its loss improving 24% —
+  unlike the other three, longer training + schedule made Nero better, not
+  more LR-tolerant.
 - **Finance stretch:** the neural pipeline finds ~no signal (near
   uniform-baseline loss, no directional edge over a naive baseline) — but
   a simple 5-lag logistic regression on the *same data* clearly does
