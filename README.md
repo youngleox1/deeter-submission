@@ -325,6 +325,50 @@ bash scripts/run_all.sh
 
 ## Results
 
+**Summary figure, before the full walkthrough below:** loss vs. LR for each
+optimizer, with the x-axis normalized to `log10(LR / that optimizer's own
+best LR)` so all four curves are aligned at their own optimum (x=0) instead
+of compared at shared absolute LR values. Left panel is the original
+500-step flat-LR sweep; right panel is the 3000-step cosine-schedule hero
+run (same full grid, both fixes from Follow-up combined).
+
+![loss vs. LR aligned to each optimizer's own best](results/core/summary_aligned_lr.png)
+
+**How longer training + schedule changes best loss and basin size, in one
+place:**
+
+| Optimizer | Best loss, flat → hero | Basin width @ X=10% around **own** best, flat → hero |
+|---|---|---|
+| AdamW | 1.718 → 1.515 (-12%) | 0.375 → **1.500** (4x wider) |
+| Muon | 1.654 → 1.494 (-10%) | 1.125 → 1.495 (+33%) |
+| SGD | 2.170 → 1.539 (-29%) | 0.000 (single-point optimum) → 0.750 |
+| Nero | 2.058 → 1.557 (-24%) | 0.375 → **0.375 (unchanged)** |
+
+Two things worth pulling out that aren't obvious from the AdamW-anchored
+tables in Follow-up below:
+
+- **Basin width measured around each optimizer's *own* best (not AdamW's)
+  tells a cleaner story than the AdamW-anchored version.** Under flat LR,
+  SGD and Nero weren't "basin-less" in an absolute sense — SGD has a sharp
+  single-point optimum (width exactly 0) and Nero has a real if narrow
+  0.375-decade basin around its own best; they just never got close enough
+  to *AdamW's* best for the AdamW-anchored metric to register anything.
+  That distinction matters because the paper's actual hypothesis is about
+  each optimizer's own LR-sensitivity, not proximity to AdamW specifically.
+- **Nero is the one optimizer whose own-basin width is completely
+  unchanged by longer training + schedule (0.375 → 0.375), despite its
+  best loss improving 24%.** AdamW's own-basin more than quadruples and
+  Muon's and SGD's widen substantially, but Nero's loss curve around its
+  own optimum is exactly as sharply peaked after the fix as before — the
+  hero run's earlier-reported improvement in Nero's *AdamW-relative*
+  standing comes entirely from AdamW's threshold loosening enough to reach
+  Nero's already-existing points, not from Nero itself becoming more
+  LR-tolerant. Not explained here; flagged as a genuine, unexplained
+  asymmetry rather than glossed over.
+
+See `scripts/plot_summary_aligned_lr.py` for how both panels and the
+own-optimum basin widths above are computed.
+
 ### Core experiment results
 
 Full sweep: 4 optimizers x 9 LRs x 3 seeds = 108 runs, 500 steps each. Raw
