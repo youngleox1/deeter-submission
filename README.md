@@ -154,6 +154,41 @@ on [`optimizer-extensions`](https://github.com/youngleox1/deeter-submission/tree
 instead of expanding this branch's grid; a full Modula/modular-norm
 implementation was scoped out entirely for time-budget reasons.
 
+**Fixed hyperparameters** (not swept — only LR varies in every sweep in this
+project; see `src/optimizers.py` and `configs/core_sweep.yaml`, identical
+across every core-experiment config used):
+
+| Optimizer | Momentum / beta(s) | Weight decay |
+|---|---|---|
+| AdamW | betas=(0.9, 0.95) | 0.0 |
+| SGD | momentum=0.9 | 0.0 (not configurable — see note) |
+| Nero | beta=0.999 (2nd-moment EMA; momentum-free by design) | not supported at all (see note) |
+| Muon | momentum=0.95 (orthogonalized branch); fallback branch betas=(0.9, 0.95) (hardcoded class default, not exposed via config) | 0.0 (see note) |
+
+**Clarifying note, since this wasn't previously spelled out in one place:
+weight decay is 0 for all four optimizers, but not for the same reason in
+each case.** For AdamW it's an explicit config choice (`weight_decay: 0.0`
+in every config) — could be swept, wasn't. For SGD and Nero, weight decay
+isn't a parameter this codebase's `build_optimizer()` exposes at all
+(`torch.optim.SGD` is called without a `weight_decay` kwarg, so it silently
+uses PyTorch's own default of 0; `Nero.__init__` has no weight-decay
+parameter whatsoever). For Muon, weight decay is genuinely absent from the
+from-scratch implementation on both branches — already flagged in
+Limitations as a deviation from native Muon's default of 0.1 (decoupled),
+but not previously connected to the fact that *no* optimizer here uses any.
+
+**This is a real limitation of the comparison, not just a disclosure**:
+AdamW's betas=(0.9, 0.95) is a deliberate but non-default choice (PyTorch's
+own AdamW default is (0.9, 0.999)) chosen once and reused for Muon's
+fallback branch too, for internal consistency — but neither AdamW's betas,
+SGD's momentum, Nero's beta, nor Muon's momentum/fallback-betas were swept
+or tuned per-optimizer. The whole basin-width/divergence comparison rests
+on these secondary hyperparameters being "reasonable" defaults for each
+method, not on them being independently optimized — so a genuinely fair
+comparison would also sweep (or at least spot-check) these, not just LR.
+Not attempted here due to time; a natural follow-up, same spirit as the
+schedule/longer-training follow-ups above.
+
 ## Success criteria (declared before running any experiment)
 
 Two complementary metrics are reported, not one — basin width alone hides the
@@ -566,6 +601,12 @@ linear effect), not evidence of market efficiency.
 - **X% was not pre-registered in a config file before the core sweep ran**
   (see Core experiment results above for how this is handled: all three
   candidate values are reported, and the conclusion is stable across them).
+- **Only LR was swept — momentum/beta values and weight decay were fixed by
+  a priori choice per optimizer, not tuned or swept** (see the "Fixed
+  hyperparameters" note under Optimizer candidates above for the exact
+  values and why weight decay ends up at 0 for all four, for different
+  reasons in each case). The comparison's validity rests on these being
+  reasonable, not optimized, defaults. Not addressed here due to time.
 - **No LR schedule of any kind is used in the core sweep** — flat, constant
   LR for its full duration, no warmup, no decay. **Addressed**: a same-grid
   cosine-warmup ablation (see
