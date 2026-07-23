@@ -387,6 +387,33 @@ steps):
 bash scripts/run_followups.sh
 ```
 
+`requirements.txt` pins minimum versions only (`>=`), not exact ones — see
+below for the exact versions every result in this README was generated
+with.
+
+<details>
+<summary>Exact package versions used (click to expand)</summary>
+
+| Package | Version |
+|---|---|
+| Python | 3.13.5 |
+| torch | 2.7.1+cu118 (CUDA 11.8) |
+| numpy | 2.1.2 |
+| pandas | 3.0.3 |
+| pyyaml | 6.0.3 |
+| matplotlib | 3.11.1 |
+| yfinance | 1.5.1 (`finance-stretch` only) |
+| pytest | 9.1.1 |
+
+GPU: NVIDIA GeForce RTX 3090, driver 595.95. `torch` here predates
+PyTorch's own `torch.optim.Muon` (added in 2.9) — see the Muon note under
+Limitations for why that matters to this project's from-scratch
+implementation. Not pinned exactly in `requirements.txt` since minimum
+versions were sufficient for everything to run correctly; recorded here
+for exact reproducibility rather than just "should work."
+
+</details>
+
 ## Results
 
 **Summary figure, before the full walkthrough below:** loss vs. LR for each
