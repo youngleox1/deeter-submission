@@ -7,12 +7,19 @@
   near-optimal, compared to AdamW/SGD? Tested on a small decoder-only
   transformer, on two domains: char-level text and discretized daily
   equity returns.
-- **Core result (text):** **Muon wins outright** — best loss *and* a 3x
-  wider basin than AdamW, robust across three different tolerance
-  thresholds. **Nero underperforms** even after a from-scratch
-  reimplementation bug was caught and fixed against the reference code —
-  a genuine open question, not explained away. SGD is the only optimizer
-  that diverges anywhere in its sampled range.
+- **Core result (text), flat LR / 500 steps:** **Muon wins outright** — best
+  loss *and* a 3x wider basin than AdamW, robust across three different
+  tolerance thresholds. **Nero underperforms** even after a from-scratch
+  reimplementation bug was caught and fixed against the reference code.
+  SGD is the only optimizer that diverges anywhere in its sampled range.
+  **But this picture changes substantially under a "hero run"** (cosine
+  schedule + 6x longer training, same full grid — see
+  [Follow-up](#follow-up-cosine-warmup-schedule-and-longer-training)): all
+  four optimizers land within 4.2% of each other's best loss, AdamW's basin
+  width ties Muon's, and SGD's divergence range shrinks by half. Most of the
+  original gap was closed by standard training hygiene, not
+  architecture-awareness — reported as a genuine, load-bearing qualifier to
+  the headline above, not a footnote.
 - **Finance stretch:** the neural pipeline finds ~no signal (near
   uniform-baseline loss, no directional edge over a naive baseline) — but
   a simple 5-lag logistic regression on the *same data* clearly does
@@ -63,6 +70,14 @@ rather than a one-time one — each new scale or dataset can, in principle,
 need its own sweep. A wider basin of near-optimal learning rates would help
 in a few concrete, distinct ways:
 
+- **Fewer sweep points needed, illustratively.**
+- **LR transfer across scale.**
+- **Avoiding catastrophic divergence, not just suboptimal loss.**
+- **Lower operational risk under periodic retraining.**
+
+<details>
+<summary>Full motivation, with citations and caveats (click to expand)</summary>
+
 - **Fewer sweep points needed, illustratively.** This is a hypothetical
   arithmetic example, not an established empirical result: *if* AdamW needs
   ~5-7 LR values on a log grid to find a near-optimal setting, and *if* an
@@ -94,6 +109,8 @@ in a few concrete, distinct ways:
   less frequent LR re-sweeping. This is a speculative extension motivating
   the stretch experiment, not a result established elsewhere, and is treated
   as such.
+
+</details>
 
 ## Hypothesis
 
@@ -196,7 +213,11 @@ negative result, not re-framed after the fact. (Exact value of X% and the
 blowup threshold are fixed in the core experiment config before the sweep is
 run, and are not tuned post-hoc.)
 
-**Secondary metrics** (diagnostic, not headline):
+**Secondary metrics** (diagnostic, not headline).
+
+<details>
+<summary>Full list, core + finance stretch (click to expand)</summary>
+
 - Compute-to-target: steps needed to reach a fixed validation loss threshold,
   at each optimizer's own best LR (sample efficiency).
 - Cross-seed variance at fixed LR (a distinct notion of robustness —
@@ -210,6 +231,8 @@ For the finance stretch, additionally reported:
 - A calibration metric (Brier score) rather than accuracy alone — a
   well-calibrated but modest model is a more honest result than a bare
   accuracy number, and calibration is the more quant-relevant property.
+
+</details>
 
 No claim of trading edge, Sharpe ratio, or backtest performance is made — the
 model and task are deliberately simple, intended only to test whether the
@@ -281,12 +304,16 @@ than picking one after seeing the results. The qualitative conclusion is
 identical across all three, so the finding is not an artifact of this gap —
 but the gap itself is real and is reported as such, not glossed over.
 
-| Optimizer | Own best val loss | Beats AdamW's best (1.718)? | log10 basin width @ X=10% |
+| Optimizer | Own best val loss (mean ± SEM, 3 seeds) | Beats AdamW's best (1.718)? | log10 basin width @ X=10% |
 |---|---|---|---|
-| AdamW | 1.718 | (reference) | 0.375 |
-| **Muon** | **1.654** | **Yes** | **1.125 (3x wider)** |
-| SGD | 2.170 | No — never within 20% at any LR tested | diverges above lr≈0.71 (all seeds) |
-| Nero | 2.058 | No — within 20% at exactly one LR (0.03), zero-width basin | n/a |
+| AdamW | 1.718 ± 0.010 | (reference) | 0.375 |
+| **Muon** | **1.654 ± 0.013** | **Yes** | **1.125 (3x wider)** |
+| SGD | 2.170 ± 0.015 | No — never within 20% at any LR tested | diverges above lr≈0.71 (all seeds) |
+| Nero | 2.058 ± 0.031 | No — within 20% at exactly one LR (0.03), zero-width basin | n/a |
+
+*(SEM = std/sqrt(3) across seeds at each optimizer's own best LR; with only
+3 seeds this is itself a noisy estimate, not a tight confidence interval —
+see `results/core/loss_vs_lr.png` for the full per-LR error bars.)*
 
 **Revision note:** an earlier version of this table used a meaningfully
 buggy Nero implementation (see `v0.5.0-nero-fix` tag / git history for the
@@ -347,12 +374,12 @@ check on each optimizer's own top-3 short-horizon LRs.
 to 10% of peak LR) — the one variable changed, so any difference is
 attributable to the schedule and not a confound with more training.
 
-| Optimizer | Own best (flat) | Own best (schedule) | Best LR (flat → schedule) | Diverged (flat → schedule) |
+| Optimizer | Own best (flat, ±SEM) | Own best (schedule, ±SEM) | Best LR (flat → schedule) | Diverged (flat → schedule) |
 |---|---|---|---|---|
-| AdamW | 1.718 | 1.695 | 0.0071 → 0.0071 (unchanged) | 0/27 → 0/27 |
-| **Nero** | 2.058 | **1.939** | 0.03 → 0.071 (+1 grid step) | 0/27 → 0/27 |
-| Muon | 1.654 | 1.634 | 0.02 → 0.02 (unchanged) | 0/27 → 0/27 |
-| SGD | 2.170 | 2.105 | 0.3 → 0.71 (+1 grid step) | 12/27 → 9/27 |
+| AdamW | 1.718 ± 0.010 | 1.695 ± 0.014 | 0.0071 → 0.0071 (unchanged) | 0/27 → 0/27 |
+| **Nero** | 2.058 ± 0.031 | **1.939 ± 0.015** | 0.03 → 0.071 (+1 grid step) | 0/27 → 0/27 |
+| Muon | 1.654 ± 0.013 | 1.634 ± 0.008 | 0.02 → 0.02 (unchanged) | 0/27 → 0/27 |
+| SGD | 2.170 ± 0.015 | 2.105 ± 0.006 | 0.3 → 0.71 (+1 grid step) | 12/27 → 9/27 |
 
 **The qualitative conclusion from the flat-LR core result is unchanged under
 the schedule** — recomputing the same basin-width table
@@ -382,12 +409,12 @@ schedule, to isolate step count from Setup A's variable) — the exact
 "longer-training check on the top 2-3 LRs per optimizer" Limitations
 proposed.
 
-| Rank @ 3000 steps | Optimizer | Best loss (3000 steps) | Best loss (500 steps) |
+| Rank @ 3000 steps | Optimizer | Best loss (3000 steps, ±SEM) | Best loss (500 steps, ±SEM) |
 |---|---|---|---|
-| 1 | Muon | 1.533 | 1.654 |
-| 2 | AdamW | 1.545 | 1.718 |
-| 3 | SGD | 1.577 | 2.170 |
-| 4 | Nero | 1.587 | 2.058 |
+| 1 | Muon | 1.533 ± 0.004 | 1.654 ± 0.013 |
+| 2 | AdamW | 1.545 ± 0.007 | 1.718 ± 0.010 |
+| 3 | SGD | 1.577 ± 0.016 | 2.170 ± 0.015 |
+| 4 | Nero | 1.587 ± 0.012 | 2.058 ± 0.031 |
 
 **The overall spread compresses sharply with more training** (1.53-1.59 at
 3000 steps vs. 1.65-2.17 at 500 steps) — direct confirmation of the
@@ -408,7 +435,95 @@ long-horizon optimum may sit even lower than the narrow window tested here.
 A full re-sweep at 3000 steps is the natural next step to confirm or rule
 that out, not attempted here due to time.
 
+**Setup C — hero run** (`configs/core_sweep_hero.yaml`,
+`results/core/hero_sweep_results.csv`): combines both fixes at once, on the
+**full** 9-LR x4-optimizer x3-seed grid rather than a narrow LR subset —
+`max_steps=3000, use_cosine_schedule=True, warmup_steps=500` (same 500-step
+warmup as Setup A, just measured against the 6x longer horizon: 16.7% of
+the run instead of 10%). This is the run Setups A and B were each isolating
+one variable of.
+
+| Optimizer | Own best, 500-step flat (±SEM) | Own best, hero (±SEM) | Best LR (flat → hero) | Diverged (flat → hero) |
+|---|---|---|---|---|
+| **Muon** | 1.654 ± 0.013 | **1.494 ± 0.007** | 0.02 → 0.047 | 0/27 → 0/27 |
+| AdamW | 1.718 ± 0.010 | 1.515 ± 0.007 | 0.0071 → 0.003 | 0/27 → 0/27 |
+| SGD | 2.170 ± 0.015 | 1.539 ± 0.007 | 0.3 → **1.687** | 12/27 → **6/27** |
+| Nero | 2.058 ± 0.031 | 1.557 ± 0.009 | 0.03 → 0.03 (unchanged) | 0/27 → 0/27 |
+
+| log10 basin width @ X | AdamW (flat → hero) | Muon (flat → hero) | SGD (flat → hero) | Nero (flat → hero) |
+|---|---|---|---|---|
+| 5% | 0.375 → 1.500 | 0.750 → 1.495 | n/a (0 qualifying LRs) → 0.750 | n/a (0 qualifying LRs) → 0.375 |
+| 10% | 0.375 → 1.500 | 1.125 → 1.495 | n/a → 0.750 | n/a → 0.375 |
+| 20% | 0.750 → 1.875 | 1.125 → 1.875 | n/a → 1.125 | 0.000 → 1.125 |
+
+**This materially changes the headline picture, and is reported plainly
+rather than downplayed.** Under the flat 500-step condition, Muon's basin
+was 3x wider than AdamW's at X=10% (1.125 vs. 0.375) and SGD/Nero never
+qualified as "near AdamW's best" at any tested tolerance. Under the hero
+condition:
+
+- **All four optimizers land within 4.2% of each other's best loss**
+  (1.494-1.557), vs. a 31% spread (1.654-2.170) at 500 steps flat. Muon is
+  still nominally best, but its margin over AdamW shrinks from 3.9% to 1.4%.
+- **AdamW's basin width now matches or very slightly exceeds Muon's**
+  (1.500 vs. 1.495 at X=5-10%; tied at 1.875 at X=20%) — the "3x wider"
+  finding does not hold once schedule and longer training are combined.
+  The 0.005 log10 difference at X=5-10% is within one grid step's worth of
+  noise and should not be read as AdamW actually winning; the honest
+  reading is a **tie**, not a reversal.
+- **SGD's divergence problem is substantially, not fully, resolved**: it
+  now trains stably up to lr=1.687 (5.6x higher than where it used to
+  diverge under flat LR) and that becomes its new best LR — but it still
+  diverges at lr≥4. SGD also now has a real, non-trivial basin (0.75-1.125
+  log10) instead of none.
+- **Nero's best LR is unchanged (0.03, same as the original flat run)**,
+  unlike Setup A where schedule alone shifted it to 0.071 — an interesting
+  wrinkle suggesting the two fixes don't simply compound in the same
+  direction for every optimizer. Nero still has the narrowest hero-run
+  basin of the four, but it is no longer zero.
+
+**What this means for the original claim:** the flat-LR, 500-step
+comparison was not "wrong," but it substantially overstated Muon's
+advantage — most of the gap it measured was closed by two standard training
+hygiene fixes (schedule, adequate training length) that have nothing to do
+with architecture-awareness per se. The narrower, more defensible claim
+supported by the hero run is that Muon is a **slightly better, never worse**
+default with **modestly better tolerance to LR misspecification at short,
+unscheduled horizons specifically** — not the strong "3x wider basin, other
+optimizers never come close" result the original setup suggested. See
+`results/core/hero_loss_vs_lr.png` for the flat-vs-hero overlay and
+`results/core/hero_basin_width.csv` for the full table.
+
+**Caveat:** this is one specific combination of schedule length, warmup
+fraction, and step count, not a sweep over those hyperparameters — it
+doesn't rule out that a differently-tuned schedule or step count could
+reopen a wider gap in either direction. Only 3 seeds per point, same as
+every other sweep in this project; SEM values above should be read as
+approximate, not tight confidence intervals.
+
+**Raw training curves**, not just the summary best/final scalars, for each
+optimizer's own best LR (seed=0 only — for qualitative shape inspection,
+not a seed-averaged claim).
+
+<details>
+<summary>Val-loss-vs-step curves, flat / schedule / hero (click to expand)</summary>
+
+![raw training curves](results/core/raw_curves.png)
+
+Data: `results/core/raw_curves.csv` (columns: `optimizer, condition, lr,
+step, val_loss`), generated by `scripts/capture_raw_curves.py`.
+
+</details>
+
 ### Ablation: does removing LayerNorm's affine params help Nero?
+
+**Result: mixed, not a clean confirmation or rejection.** LayerNorm's affine
+params don't appear to be the main driver of Nero's overall underperformance
+— but they do provide some stabilizing effect specifically at high LR, the
+opposite direction from the original hypothesis.
+
+<details>
+<summary>Setup and full result (click to expand)</summary>
 
 Raised during review: Nero's projection assumes a neuron's weight scale
 (and, per the corrected implementation, its mean) is irrelevant because
@@ -420,19 +535,20 @@ same LR grid/seeds/steps as the core sweep, `model.layernorm_affine=False`
 `results/ablations/nero_no_ln_affine/sweep_results.csv`), rerun against the
 corrected Nero.
 
-**Result: mixed, not a clean confirmation or rejection.** At most LRs
-(0.0009 through 0.03, and again at 0.07), keeping the affine params does
-slightly better than removing them — the hypothesis is not supported
-there. But at lr=0.4, removing them is clearly better (2.85 vs 3.08), and
-at the highest LR (0.95), keeping them is much better (3.28 vs 5.71 —
-removing affine makes the high-LR degradation much worse, not better).
-So the honest read is: LayerNorm's affine params don't appear to be the
-main driver of Nero's overall underperformance (removing them doesn't
-fix it, and mostly makes things slightly worse) — but they do appear to
-provide some stabilizing effect specifically at high LR, which is the
-opposite direction from the original hypothesis. Reported as a
+At most LRs (0.0009 through 0.03, and again at 0.07), keeping the affine
+params does slightly better than removing them — the hypothesis is not
+supported there. But at lr=0.4, removing them is clearly better (2.85 vs
+3.08), and at the highest LR (0.95), keeping them is much better (3.28 vs
+5.71 — removing affine makes the high-LR degradation much worse, not
+better). So the honest read is: LayerNorm's affine params don't appear to
+be the main driver of Nero's overall underperformance (removing them
+doesn't fix it, and mostly makes things slightly worse) — but they do
+appear to provide some stabilizing effect specifically at high LR, which is
+the opposite direction from the original hypothesis. Reported as a
 tested-and-not-confirmed hypothesis with a genuine, unanticipated
 secondary finding, not retro-fitted into either story after the fact.
+
+</details>
 
 ### Finance stretch results
 
@@ -458,7 +574,10 @@ linear effect), not evidence of market efficiency.
   both loss and basin width — but finds a real secondary effect: the
   schedule disproportionately helps Nero (best loss improves 5.8%, vs.
   ~1-1.5% for AdamW/Muon) and rescues one SGD divergence point, without
-  closing Nero's gap to AdamW or Muon.
+  closing Nero's gap to AdamW or Muon. **Combined with longer training**
+  (the hero run, full grid), the schedule's effect is much larger: all four
+  optimizers land within 4.2% of each other and AdamW's basin width ties
+  Muon's — see Setup C in Follow-up above.
 - **500 training steps is short** relative to typical conventions for this
   exact toy setup (e.g. nanoGPT's own char-level tiny-Shakespeare example
   commonly trains several thousand steps), meaning the core ranking risked
@@ -472,6 +591,11 @@ linear effect), not evidence of market efficiency.
   a narrow, short-horizon-selected set of LRs was retested, not a fresh
   grid, so this remains partial: Nero's true long-horizon-optimal LR may
   lie outside the window tested (see the caveat in Follow-up above).
+  **Fully addressed via the hero run** (full grid, both fixes combined,
+  Setup C in Follow-up above): confirms the compression effect on the full
+  grid, not just the narrow top-3-LR window, and additionally shows SGD's
+  divergence range roughly halves (12/27 → 6/27) once trained longer with
+  a schedule.
 - **Muon is a simplified, from-scratch reproduction**, not a verbatim port
   of a reference implementation. (Muon wasn't in any version of PyTorch
   when this was written — it was added as `torch.optim.Muon` in PyTorch
