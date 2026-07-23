@@ -2,42 +2,35 @@
 
 ## TL;DR
 
-- **Question:** does an architecture-aware optimizer (Nero, Muon) trade a
-  bit of best-case loss for a *wider* range of learning rates that stay
-  near-optimal, compared to AdamW/SGD? Tested on a small decoder-only
-  transformer, on two domains: char-level text and discretized daily
-  equity returns.
-- **Core result (text), flat LR / 500 steps:** **Muon wins outright** — best
-  loss *and* a 3x wider basin than AdamW, robust across three different
-  tolerance thresholds. **Nero underperforms** even after a from-scratch
-  reimplementation bug was caught and fixed against the reference code.
-  SGD is the only optimizer that diverges anywhere in its sampled range.
-  **But this picture changes substantially under a "hero run"** (cosine
-  schedule + 6x longer training, same full grid — see
-  [Results summary figure](#results) and
-  [Follow-up](#follow-up-cosine-warmup-schedule-and-longer-training)): all
-  four optimizers land within 4.2% of each other's best loss, AdamW's basin
-  width ties Muon's (measured either relative to AdamW's best or to each
-  optimizer's own), and SGD's divergence range shrinks by half. Most of the
-  original gap was closed by standard training hygiene, not
-  architecture-awareness — reported as a genuine, load-bearing qualifier to
-  the headline above, not a footnote. One exception, itself unexplained:
-  **Nero's basin width around its *own* best is completely unchanged by the
-  fix** (0.375 log10 decades either way) despite its loss improving 24% —
-  unlike the other three, longer training + schedule made Nero better, not
-  more LR-tolerant.
-- **Finance stretch:** the neural pipeline finds ~no signal (near
-  uniform-baseline loss, no directional edge over a naive baseline) — but
-  a simple 5-lag logistic regression on the *same data* clearly does
-  (beats naive on all 6 tickers). So the honest conclusion isn't "market
-  efficiency," it's "this pipeline's 8-bin discretization + cross-entropy
-  objective fails to extract a signal that demonstrably exists." See
-  [Branches](#branches) — that finding lives on `finance-stretch`.
-- Full navigation: [Table of contents](#table-of-contents).
+- **Question:** does an architecture-aware optimizer (Nero, Muon) trade
+  best-case loss for a *wider* range of near-optimal learning rates than
+  AdamW/SGD? Tested on a small decoder-only transformer on char-level text.
+- **Core result:** at 500 steps flat LR, **Muon wins outright** (best loss,
+  3x wider basin); SGD is the only one that diverges. Under longer
+  training + a schedule (right panel below), most of that gap closes — all
+  four land within 4.2% of each other and AdamW ties Muon's basin width at
+  half the compute cost. Full story, including the one optimizer that
+  *doesn't* catch up: [Results](#results).
+- Full navigation: [Table of contents](#table-of-contents). (There's also
+  an incomplete finance stretch — see [Branches](#branches).)
+
+![Validation loss vs. learning rate for four optimizers (AdamW, SGD+momentum, Nero, Muon), each LR axis normalized to that optimizer's own best (x=0). Left: 500 steps, flat LR. Right: 3000 steps, cosine-warmup schedule ("hero" run).](results/core/summary_aligned_lr.png)
+
+*Validation loss vs. learning rate, four optimizers (AdamW, SGD+momentum,
+Nero, Muon) training a small decoder-only transformer (d_model=128, 4
+layers, 4 heads, ~820K params) for next-character prediction on
+char-level tiny-Shakespeare. Each optimizer's x-axis is normalized to
+`log10(LR / that optimizer's own best LR)`, aligning all four at their own
+optimum (x=0) regardless of absolute LR scale. **Left:** 500 training
+steps, flat (unscheduled) LR — the project's original setup. **Right:**
+3000 steps with a cosine-warmup LR schedule (the "hero" run below).
+Points are mean best validation loss ± SEM across 3 seeds; "x" markers
+denote LRs where at least one seed diverged.*
 
 ## Table of contents
 
 - [Branches](#branches)
+- [Versions](#versions)
 - [Motivation](#motivation)
 - [Hypothesis](#hypothesis)
 - [Optimizer candidates](#optimizer-candidates)
@@ -62,11 +55,28 @@ self-contained unit of work with its own commits/results/writeup:
 | Branch | Contents |
 |---|---|
 | [`master`](https://github.com/youngleox1/deeter-submission/tree/master) | Core text experiment (this README), the Nero rewrite, and the LayerNorm-affine ablation. |
-| [`finance-stretch`](https://github.com/youngleox1/deeter-submission/tree/finance-stretch) | The finance stretch experiment, plus the signal-investigation finding described in the TL;DR above. |
+| [`finance-stretch`](https://github.com/youngleox1/deeter-submission/tree/finance-stretch) | **Incomplete.** The finance stretch experiment: the neural pipeline finds ~no signal, but a simple 5-lag logistic regression on the same data does — a pipeline limitation, not market efficiency. Unlike the core experiment above, this was never rerun with the schedule/longer-training fix, even though that fix substantially changed the core conclusion — untested whether it would change this one too. |
 | [`optimizer-extensions`](https://github.com/youngleox1/deeter-submission/tree/optimizer-extensions) | Exploring two more optimizer variants: LAMB, and a per-head Muon that orthogonalizes each attention head's weight sub-block independently. |
 
-Git tags (`v0.1.0-scaffold` through `v0.5.0-nero-fix`) mark milestones in
-`master`'s history — see `git tag -n` or the repo's Tags page.
+Git tags mark milestones across this repo's history — see [Versions](#versions)
+below, `git tag -n99`, or the repo's Tags page.
+
+## Versions
+
+| Tag | Milestone |
+|---|---|
+| [`v0.1.0-scaffold`](https://github.com/youngleox1/deeter-submission/releases/tag/v0.1.0-scaffold) | Initial scaffold — hypothesis, motivation, optimizer candidates, and success criteria declared in the README before any experiment code exists. |
+| [`v0.2.0-core-pipeline`](https://github.com/youngleox1/deeter-submission/releases/tag/v0.2.0-core-pipeline) | Core experiment pipeline complete — model, optimizers (AdamW/SGD/Nero/Muon), text data loader, training loop, and sweep driver in place and tested. |
+| [`v0.3.0-core-results`](https://github.com/youngleox1/deeter-submission/releases/tag/v0.3.0-core-results) | First-pass core experiment results (108-run sweep) — later found to use a buggy Nero implementation, see `v0.5.0-nero-fix`. |
+| [`v0.4.0-finance-pipeline`](https://github.com/youngleox1/deeter-submission/releases/tag/v0.4.0-finance-pipeline) | Finance stretch pipeline complete — data loader with a leakage-regression test, shared core/finance training code, directional-accuracy/Brier-score eval. |
+| [`v0.5.0-nero-fix`](https://github.com/youngleox1/deeter-submission/releases/tag/v0.5.0-nero-fix) | Nero corrected to match the reference implementation after a review catch (mean-centering, re-projection target, second-moment averaging, spurious 1D momentum) — core/finance/ablation sweeps rerun against the fix. |
+| [`v0.6.0-finance-v2-binary-volscale`](https://github.com/youngleox1/deeter-submission/releases/tag/v0.6.0-finance-v2-binary-volscale) | Finance stretch v2 (`finance-stretch` branch) — binary direction + volatility scaling; mixed, honestly-reported result (a genuine directional-accuracy edge for the first time, but less loss structure than v1). |
+| [`v0.7.0-schedule-and-longer-training`](https://github.com/youngleox1/deeter-submission/releases/tag/v0.7.0-schedule-and-longer-training) | Cosine-warmup schedule ablation + 3000-step longer-training check (top-3 LRs) — core ranking holds, but the schedule disproportionately helps Nero without closing its gap, and longer training flips Nero/SGD's relative order. |
+| [`v0.8.0-hero-run`](https://github.com/youngleox1/deeter-submission/releases/tag/v0.8.0-hero-run) | **Hero run** — both v0.7.0 fixes combined on the full grid. Materially changes the headline: all four optimizers land within 4.2% of each other's best loss (vs. 31% at 500 steps flat), and AdamW's basin width ties Muon's. SEM and raw training curves added. |
+| [`v0.9.0-optimizer-cost-and-takeaways`](https://github.com/youngleox1/deeter-submission/releases/tag/v0.9.0-optimizer-cost-and-takeaways) | Measured (not just asserted) compute/memory footprint per optimizer, a concrete NxN complexity breakdown, and a "Practical takeaways" section synthesizing everything into budget-based optimizer choice guidance. |
+
+Not yet tagged: this Versions section itself, and the TL;DR/README
+restructuring around it — still in progress as of this revision.
 
 ## Motivation
 
@@ -881,3 +891,11 @@ linear effect), not evidence of market efficiency.
   see Branches above.)
 
 </details>
+
+---
+
+*Footnote: most of the code, experiments, and this writeup were generated
+by Claude. The commit history is also noisier than a single author would
+produce by hand — more, smaller commit-and-push cycles than strictly
+necessary — because reviewing changes on GitHub's mobile site was the most
+convenient way to check work in progress from a phone.*
