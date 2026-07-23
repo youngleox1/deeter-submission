@@ -29,8 +29,8 @@ denote LRs where at least one seed diverged.*
 
 ## Table of contents
 
-- [Branches](#branches)
-- [Versions](#versions)
+- [Branches](#branches) *(folded)*
+- [Versions](#versions) *(folded)*
 - [Motivation](#motivation)
 - [Hypothesis](#hypothesis)
 - [Optimizer candidates](#optimizer-candidates)
@@ -41,13 +41,15 @@ denote LRs where at least one seed diverged.*
 - [Results](#results)
   - [Core experiment results](#core-experiment-results)
   - [Follow-up: schedule and longer training](#follow-up-cosine-warmup-schedule-and-longer-training)
+  - [Compute and memory footprint](#compute-and-memory-footprint)
   - [Practical takeaways: choosing an optimizer](#practical-takeaways-choosing-an-optimizer-under-different-budgets)
   - [Ablation: LayerNorm affine params](#ablation-does-removing-layernorms-affine-params-help-nero)
   - [Finance stretch results](#finance-stretch-results)
 - [Limitations](#limitations) *(folded)*
 - [References](#references) *(folded)*
 
-## Branches
+<details id="branches">
+<summary><h2>Branches (click to expand)</h2></summary>
 
 This repo uses three branches rather than one long-running one — each is a
 self-contained unit of work with its own commits/results/writeup:
@@ -61,7 +63,10 @@ self-contained unit of work with its own commits/results/writeup:
 Git tags mark milestones across this repo's history — see [Versions](#versions)
 below, `git tag -n99`, or the repo's Tags page.
 
-## Versions
+</details>
+
+<details id="versions">
+<summary><h2>Versions (click to expand)</h2></summary>
 
 | Tag | Milestone |
 |---|---|
@@ -77,6 +82,8 @@ below, `git tag -n99`, or the repo's Tags page.
 
 Not yet tagged: this Versions section itself, and the TL;DR/README
 restructuring around it — still in progress as of this revision.
+
+</details>
 
 ## Motivation
 
@@ -144,7 +151,8 @@ This is tested twice, on two structurally different sequence domains:
 2. **Stretch experiment**: the same model/optimizer code, applied to next-day
    return/direction forecasting on public daily equity data (via `yfinance`).
 
-### Why decoder-only transformer on text, not vision (tiny ViT on MNIST/CIFAR)?
+<details>
+<summary><b>Why decoder-only transformer on text, not vision (tiny ViT on MNIST/CIFAR)?</b> (click to expand)</summary>
 
 Both are legitimate choices, and both have precedent in prior architecture-aware
 optimizer work (vision CNNs in the original Nero paper; GPT-style transformers
@@ -156,6 +164,8 @@ stretch means only the *data domain* changes between the two experiments, not
 the domain and the architecture family at once. That keeps the transfer claim
 ("does the basin-width finding hold in a new domain") interpretable, rather
 than conflated with "does it also hold for a different architecture class."
+
+</details>
 
 ## Optimizer candidates
 
@@ -182,19 +192,27 @@ across every core-experiment config used):
 | Nero | beta=0.999 (2nd-moment EMA; momentum-free by design) | not supported at all (see note) |
 | Muon | momentum=0.95 (orthogonalized branch); fallback branch betas=(0.9, 0.95) (hardcoded class default, not exposed via config) | 0.0 (see note) |
 
-**Clarifying note, since this wasn't previously spelled out in one place:
-weight decay is 0 for all four optimizers, but not for the same reason in
-each case.** For AdamW it's an explicit config choice (`weight_decay: 0.0`
-in every config) — could be swept, wasn't. For SGD and Nero, weight decay
-isn't a parameter this codebase's `build_optimizer()` exposes at all
-(`torch.optim.SGD` is called without a `weight_decay` kwarg, so it silently
-uses PyTorch's own default of 0; `Nero.__init__` has no weight-decay
-parameter whatsoever). For Muon, weight decay is genuinely absent from the
-from-scratch implementation on both branches — already flagged in
-Limitations as a deviation from native Muon's default of 0.1 (decoupled),
-but not previously connected to the fact that *no* optimizer here uses any.
+<details>
+<summary>Notes on weight decay (click to expand)</summary>
 
-**This is a real limitation of the comparison, not just a disclosure**:
+Weight decay is 0 for all four optimizers, but not for the same reason in
+each case — not previously spelled out in one place. For AdamW it's an
+explicit config choice (`weight_decay: 0.0` in every config) — could be
+swept, wasn't. For SGD and Nero, weight decay isn't a parameter this
+codebase's `build_optimizer()` exposes at all (`torch.optim.SGD` is called
+without a `weight_decay` kwarg, so it silently uses PyTorch's own default
+of 0; `Nero.__init__` has no weight-decay parameter whatsoever). For Muon,
+weight decay is genuinely absent from the from-scratch implementation on
+both branches — already flagged in Limitations as a deviation from native
+Muon's default of 0.1 (decoupled), but not previously connected to the
+fact that *no* optimizer here uses any.
+
+</details>
+
+<details>
+<summary>Notes on betas/momentum (click to expand)</summary>
+
+This is a real limitation of the comparison, not just a disclosure:
 AdamW's betas=(0.9, 0.95) is a deliberate but non-default choice (PyTorch's
 own AdamW default is (0.9, 0.999)) chosen once and reused for Muon's
 fallback branch too, for internal consistency — but neither AdamW's betas,
@@ -206,77 +224,7 @@ comparison would also sweep (or at least spot-check) these, not just LR.
 Not attempted here due to time; a natural follow-up, same spirit as the
 schedule/longer-training follow-ups above.
 
-**Compute and memory footprint, measured rather than just asserted**
-(`scripts/measure_optimizer_cost.py`, on this project's actual model —
-821,760 params; `results/core/optimizer_cost.csv`). Two separate things,
-since they don't move together: optimizer *state* memory (exact, analytic
-— element count in `optimizer.state`) and *per-step wall-clock time*
-(empirical — mean over the full 500-step sweep's own recorded
-`wall_clock_seconds`, `results/core/sweep_results.csv`, n=27 runs/optimizer,
-the more trustworthy number vs. a short standalone microbenchmark).
-
-| Optimizer | State memory (extra, vs. param count) | State memory (fp32) | ms/step (sweep-measured) | Peak CUDA memory (measured) |
-|---|---|---|---|---|
-| SGD | 1.00x (momentum only) | 3.29 MB | 22.4 ms | 316.7 MB |
-| AdamW | 2.00x (m + v) | 6.57 MB | 22.8 ms | 320.0 MB |
-| **Nero** | **0.01x** (per-neuron stats only, not per-parameter) | **0.03 MB** | 42.0 ms (1.8x AdamW) | 313.5 MB |
-| Muon | 1.04x (mostly momentum-only; small AdamW-fallback branch) | 3.43 MB | 45.9 ms (2.0x AdamW) | 316.8 MB |
-
-**Concretely, for a single N x N weight matrix** (this project's attention
-and MLP hidden matrices are this shape, or close — `proj` is exactly 128x128;
-`fc1`/`fc2` are 128x512, i.e. N x cN, see the general note below), to explain
-*why* the measured numbers come out this way, not just that they do:
-
-| Optimizer | Extra memory for this matrix | Compute for this matrix, per step |
-|---|---|---|
-| AdamW | `2N²` (m, v — full matrix each) | `O(N²)` — elementwise (mul/add/sqrt/div per entry) |
-| SGD | `N²` (momentum — full matrix) | `O(N²)` — elementwise |
-| **Nero** | **`O(N)`** — one norm scalar *per row*, not per entry | `O(N²)` — same order as AdamW/SGD (every entry still gets read to compute the row norms/means), just 2-3x the constant from doing that twice per step |
-| Muon | `N²` (momentum — full matrix, same as SGD) | **`O(N³)`** — 5 Newton-Schulz iterations, each an N x N matrix multiply (`X @ X.T`, `A @ A`, `B @ X`), dominating the `O(N²)` momentum update |
-
-So per weight matrix: **Nero's memory drops from `O(N²)` to `O(N)`** — a
-real asymptotic win, not just a smaller constant — while **Muon's compute
-grows from `O(N²)` to `O(N³)`** — a real asymptotic penalty, from the only
-matrix-multiply (as opposed to elementwise/row-reduction) operation any of
-the four optimizers performs. Both effects are driven by the same variable,
-matrix width `N`, so both should become *more* pronounced at larger `N`
-(bigger models), not less — an asymptotic argument, not an empirically
-verified trend, since this project only tested one fixed width
-(`d_model=128`; no scaling sweep was run). For a rectangular `out x in`
-matrix, read `N` above as `min(out, in)` for the Newton-Schulz term and as
-`out` (the number of rows/neurons) for Nero's memory term — the two aren't
-the same axis in general, though they coincide for the square case above.
-
-**Memory and compute don't rank the same way, and that's the interesting
-part:**
-
-- **Nero has by far the smallest optimizer-state footprint** — its second
-  moment is tracked per-*neuron* (one scalar per output row,
-  `_neuron_norm(p)`), not per-parameter, so state size scales with neuron
-  *count*, not weight *count*. For this model that's a 200x smaller state
-  than AdamW's, not just a constant-factor win. But it is **not** the
-  fastest — at 1.8x AdamW's per-step time, it's the second-slowest of the
-  four, because the per-neuron mean/norm reprojection (`_neuron_mean`,
-  `_neuron_norm`) runs twice per step (once for the gradient-normalization
-  statistics, once for the post-step re-centering/re-projection
-  constraint) — extra reduction passes over the full parameter tensor that
-  AdamW/SGD never do.
-- **Muon's state memory is close to SGD's** (1.04x — most parameters are
-  transformer hidden matrices that only get a momentum buffer, not a full
-  AdamW-style state), but it is the **slowest** optimizer measured, at 2.0x
-  AdamW's per-step time — the `O(N³)` Newton-Schulz term above
-  (`zeropower_via_newtonschulz`, 5 matrix-matrix-multiply iterations per
-  hidden weight matrix per step), the only super-linear, non-elementwise
-  cost of the four. At this model's width (d_model=128, mlp hidden=512)
-  that overhead is still small in absolute wall-clock terms, but per the
-  asymptotic argument above it should grow, not shrink, at larger widths.
-- **Peak CUDA memory is ~identical across all four (313-320 MB) at this
-  model's scale** — the state-memory differences above (kilobytes to a few
-  MB) are completely swamped by CUDA context and activation memory for a
-  toy model this small. The 200x state-memory advantage Nero shows
-  analytically would only become practically visible at a model scale
-  where optimizer state is a meaningful fraction of total memory —
-  untested here, since that's well outside this project's compute budget.
+</details>
 
 ## Success criteria (declared before running any experiment)
 
@@ -381,19 +329,35 @@ basin-width/divergence-rate findings transfer out of domain.
 
 ```
 src/
-  model.py            small decoder-only transformer
-  optimizers.py       AdamW/SGD baselines + Nero + Muon (from-scratch, checked against references)
-  train.py            single training run
-  sweep.py            LR x optimizer x seed grid driver
-  eval_finance.py     directional-accuracy / Brier-score eval (finance stretch)
+  model.py                    small decoder-only transformer
+  optimizers.py               AdamW/SGD baselines + Nero + Muon (from-scratch, checked against references)
+  lr_schedule.py              cosine-warmup LR schedule (opt-in, see Follow-up)
+  train.py                    single training run
+  sweep.py                    LR x optimizer x seed grid driver
+  eval_finance.py             directional-accuracy / Brier-score eval (finance stretch)
   data/
-    text.py           core experiment data loader (vendored corpus)
-    finance.py        finance stretch data loader (vendored cache + yfinance)
-configs/              core_sweep.yaml, finance_sweep.yaml, LayerNorm-affine ablation config
-results/              sweep outputs (csv) and generated plots
-tests/                unit/smoke tests (see How to run)
-analysis.ipynb        generates all core-experiment plots/tables from results/*.csv
-scripts/run_all.sh    reproduce core experiment + ablation end to end
+    text.py                   core experiment data loader (vendored corpus)
+    finance.py                finance stretch data loader (vendored cache + yfinance)
+configs/
+  core_sweep.yaml                          original core sweep (500 steps, flat LR)
+  core_sweep_schedule_ablation.yaml        + cosine-warmup schedule, same grid/steps
+  core_longer_training_check.yaml          top-3 LRs/optimizer, 3000 steps, flat LR
+  core_sweep_hero.yaml                     both fixes combined, full grid, 3000 steps
+  ablation_nero_no_ln_affine.yaml          LayerNorm-affine ablation
+  finance_sweep.yaml                       finance stretch (lives on `finance-stretch`)
+results/               sweep outputs (csv) and generated plots
+tests/                 unit/smoke tests (see How to run)
+analysis.ipynb         generates the original core-experiment plots/tables from results/*.csv
+scripts/
+  run_all.sh                                  reproduce the original core sweep + ablation
+  run_followups.sh                            reproduce everything past that (schedule ablation,
+                                               longer-training check, hero run, and analysis below) --
+                                               substantially longer, see the script's own header
+  analyze_schedule_and_longer_training.py     basin-width tables for the schedule/longer-training sweeps
+  analyze_with_sem.py                         adds SEM to plots/tables; regenerates loss-vs-LR PNGs
+  plot_summary_aligned_lr.py                  the headline own-optimum-aligned summary figure
+  capture_raw_curves.py                       per-optimizer val-loss-vs-step curves (flat/schedule/hero)
+  measure_optimizer_cost.py                   measures optimizer-state memory + per-step wall-clock cost
 ```
 
 (Finance-specific files — `results/finance/`, `analysis_finance.ipynb`,
@@ -408,8 +372,19 @@ pip install -r requirements.txt
 pytest                          # run test suite
 python -m src.sweep --config configs/core_sweep.yaml
 python -m src.sweep --config configs/ablation_nero_no_ln_affine.yaml
-# or, to do all of the above in one go:
+# or, to do all of the above in one go (~20 min on a single GPU):
 bash scripts/run_all.sh
+```
+
+That reproduces the original 500-step core sweep + LayerNorm-affine
+ablation only. Everything past that — the schedule ablation, the
+longer-training check, and the hero run the headline figure and TL;DR are
+built on — is reproduced by a separate, substantially longer script
+(~3 hours on a single GPU, dominated by the hero run's 108 runs x 3000
+steps):
+
+```bash
+bash scripts/run_followups.sh
 ```
 
 ## Results
@@ -682,6 +657,80 @@ Data: `results/core/raw_curves.csv` (columns: `optimizer, condition, lr,
 step, val_loss`), generated by `scripts/capture_raw_curves.py`.
 
 </details>
+
+### Compute and memory footprint
+
+**Measured rather than just asserted** (`scripts/measure_optimizer_cost.py`,
+on this project's actual model — 821,760 params;
+`results/core/optimizer_cost.csv`). Two separate things, since they don't
+move together: optimizer *state* memory (exact, analytic — element count in
+`optimizer.state`) and *per-step wall-clock time* (empirical — mean over the
+full 500-step sweep's own recorded `wall_clock_seconds`,
+`results/core/sweep_results.csv`, n=27 runs/optimizer, the more trustworthy
+number vs. a short standalone microbenchmark).
+
+| Optimizer | State memory (extra, vs. param count) | State memory (fp32) | ms/step (sweep-measured) | Peak CUDA memory (measured) |
+|---|---|---|---|---|
+| SGD | 1.00x (momentum only) | 3.29 MB | 22.4 ms | 316.7 MB |
+| AdamW | 2.00x (m + v) | 6.57 MB | 22.8 ms | 320.0 MB |
+| **Nero** | **0.01x** (per-neuron stats only, not per-parameter) | **0.03 MB** | 42.0 ms (1.8x AdamW) | 313.5 MB |
+| Muon | 1.04x (mostly momentum-only; small AdamW-fallback branch) | 3.43 MB | 45.9 ms (2.0x AdamW) | 316.8 MB |
+
+**Concretely, for a single N x N weight matrix** (this project's attention
+and MLP hidden matrices are this shape, or close — `proj` is exactly 128x128;
+`fc1`/`fc2` are 128x512, i.e. N x cN, see the general note below), to explain
+*why* the measured numbers come out this way, not just that they do:
+
+| Optimizer | Extra memory for this matrix | Compute for this matrix, per step |
+|---|---|---|
+| AdamW | `2N²` (m, v — full matrix each) | `O(N²)` — elementwise (mul/add/sqrt/div per entry) |
+| SGD | `N²` (momentum — full matrix) | `O(N²)` — elementwise |
+| **Nero** | **`O(N)`** — one norm scalar *per row*, not per entry | `O(N²)` — same order as AdamW/SGD (every entry still gets read to compute the row norms/means), just 2-3x the constant from doing that twice per step |
+| Muon | `N²` (momentum — full matrix, same as SGD) | **`O(N³)`** — 5 Newton-Schulz iterations, each an N x N matrix multiply (`X @ X.T`, `A @ A`, `B @ X`), dominating the `O(N²)` momentum update |
+
+So per weight matrix: **Nero's memory drops from `O(N²)` to `O(N)`** — a
+real asymptotic win, not just a smaller constant — while **Muon's compute
+grows from `O(N²)` to `O(N³)`** — a real asymptotic penalty, from the only
+matrix-multiply (as opposed to elementwise/row-reduction) operation any of
+the four optimizers performs. Both effects are driven by the same variable,
+matrix width `N`, so both should become *more* pronounced at larger `N`
+(bigger models), not less — an asymptotic argument, not an empirically
+verified trend, since this project only tested one fixed width
+(`d_model=128`; no scaling sweep was run). For a rectangular `out x in`
+matrix, read `N` above as `min(out, in)` for the Newton-Schulz term and as
+`out` (the number of rows/neurons) for Nero's memory term — the two aren't
+the same axis in general, though they coincide for the square case above.
+
+**Memory and compute don't rank the same way, and that's the interesting
+part:**
+
+- **Nero has by far the smallest optimizer-state footprint** — its second
+  moment is tracked per-*neuron* (one scalar per output row,
+  `_neuron_norm(p)`), not per-parameter, so state size scales with neuron
+  *count*, not weight *count*. For this model that's a 200x smaller state
+  than AdamW's, not just a constant-factor win. But it is **not** the
+  fastest — at 1.8x AdamW's per-step time, it's the second-slowest of the
+  four, because the per-neuron mean/norm reprojection (`_neuron_mean`,
+  `_neuron_norm`) runs twice per step (once for the gradient-normalization
+  statistics, once for the post-step re-centering/re-projection
+  constraint) — extra reduction passes over the full parameter tensor that
+  AdamW/SGD never do.
+- **Muon's state memory is close to SGD's** (1.04x — most parameters are
+  transformer hidden matrices that only get a momentum buffer, not a full
+  AdamW-style state), but it is the **slowest** optimizer measured, at 2.0x
+  AdamW's per-step time — the `O(N³)` Newton-Schulz term above
+  (`zeropower_via_newtonschulz`, 5 matrix-matrix-multiply iterations per
+  hidden weight matrix per step), the only super-linear, non-elementwise
+  cost of the four. At this model's width (d_model=128, mlp hidden=512)
+  that overhead is still small in absolute wall-clock terms, but per the
+  asymptotic argument above it should grow, not shrink, at larger widths.
+- **Peak CUDA memory is ~identical across all four (313-320 MB) at this
+  model's scale** — the state-memory differences above (kilobytes to a few
+  MB) are completely swamped by CUDA context and activation memory for a
+  toy model this small. The 200x state-memory advantage Nero shows
+  analytically would only become practically visible at a model scale
+  where optimizer state is a meaningful fraction of total memory —
+  untested here, since that's well outside this project's compute budget.
 
 ### Practical takeaways: choosing an optimizer under different budgets
 
