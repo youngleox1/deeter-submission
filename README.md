@@ -48,6 +48,7 @@
 - [Results](#results)
   - [Core experiment results](#core-experiment-results)
   - [Follow-up: schedule and longer training](#follow-up-cosine-warmup-schedule-and-longer-training)
+  - [Practical takeaways: choosing an optimizer](#practical-takeaways-choosing-an-optimizer-under-different-budgets)
   - [Ablation: LayerNorm affine params](#ablation-does-removing-layernorms-affine-params-help-nero)
   - [Finance stretch results](#finance-stretch-results)
 - [Limitations](#limitations) *(folded)*
@@ -194,6 +195,78 @@ method, not on them being independently optimized — so a genuinely fair
 comparison would also sweep (or at least spot-check) these, not just LR.
 Not attempted here due to time; a natural follow-up, same spirit as the
 schedule/longer-training follow-ups above.
+
+**Compute and memory footprint, measured rather than just asserted**
+(`scripts/measure_optimizer_cost.py`, on this project's actual model —
+821,760 params; `results/core/optimizer_cost.csv`). Two separate things,
+since they don't move together: optimizer *state* memory (exact, analytic
+— element count in `optimizer.state`) and *per-step wall-clock time*
+(empirical — mean over the full 500-step sweep's own recorded
+`wall_clock_seconds`, `results/core/sweep_results.csv`, n=27 runs/optimizer,
+the more trustworthy number vs. a short standalone microbenchmark).
+
+| Optimizer | State memory (extra, vs. param count) | State memory (fp32) | ms/step (sweep-measured) | Peak CUDA memory (measured) |
+|---|---|---|---|---|
+| SGD | 1.00x (momentum only) | 3.29 MB | 22.4 ms | 316.7 MB |
+| AdamW | 2.00x (m + v) | 6.57 MB | 22.8 ms | 320.0 MB |
+| **Nero** | **0.01x** (per-neuron stats only, not per-parameter) | **0.03 MB** | 42.0 ms (1.8x AdamW) | 313.5 MB |
+| Muon | 1.04x (mostly momentum-only; small AdamW-fallback branch) | 3.43 MB | 45.9 ms (2.0x AdamW) | 316.8 MB |
+
+**Concretely, for a single N x N weight matrix** (this project's attention
+and MLP hidden matrices are this shape, or close — `proj` is exactly 128x128;
+`fc1`/`fc2` are 128x512, i.e. N x cN, see the general note below), to explain
+*why* the measured numbers come out this way, not just that they do:
+
+| Optimizer | Extra memory for this matrix | Compute for this matrix, per step |
+|---|---|---|
+| AdamW | `2N²` (m, v — full matrix each) | `O(N²)` — elementwise (mul/add/sqrt/div per entry) |
+| SGD | `N²` (momentum — full matrix) | `O(N²)` — elementwise |
+| **Nero** | **`O(N)`** — one norm scalar *per row*, not per entry | `O(N²)` — same order as AdamW/SGD (every entry still gets read to compute the row norms/means), just 2-3x the constant from doing that twice per step |
+| Muon | `N²` (momentum — full matrix, same as SGD) | **`O(N³)`** — 5 Newton-Schulz iterations, each an N x N matrix multiply (`X @ X.T`, `A @ A`, `B @ X`), dominating the `O(N²)` momentum update |
+
+So per weight matrix: **Nero's memory drops from `O(N²)` to `O(N)`** — a
+real asymptotic win, not just a smaller constant — while **Muon's compute
+grows from `O(N²)` to `O(N³)`** — a real asymptotic penalty, from the only
+matrix-multiply (as opposed to elementwise/row-reduction) operation any of
+the four optimizers performs. Both effects are driven by the same variable,
+matrix width `N`, so both should become *more* pronounced at larger `N`
+(bigger models), not less — an asymptotic argument, not an empirically
+verified trend, since this project only tested one fixed width
+(`d_model=128`; no scaling sweep was run). For a rectangular `out x in`
+matrix, read `N` above as `min(out, in)` for the Newton-Schulz term and as
+`out` (the number of rows/neurons) for Nero's memory term — the two aren't
+the same axis in general, though they coincide for the square case above.
+
+**Memory and compute don't rank the same way, and that's the interesting
+part:**
+
+- **Nero has by far the smallest optimizer-state footprint** — its second
+  moment is tracked per-*neuron* (one scalar per output row,
+  `_neuron_norm(p)`), not per-parameter, so state size scales with neuron
+  *count*, not weight *count*. For this model that's a 200x smaller state
+  than AdamW's, not just a constant-factor win. But it is **not** the
+  fastest — at 1.8x AdamW's per-step time, it's the second-slowest of the
+  four, because the per-neuron mean/norm reprojection (`_neuron_mean`,
+  `_neuron_norm`) runs twice per step (once for the gradient-normalization
+  statistics, once for the post-step re-centering/re-projection
+  constraint) — extra reduction passes over the full parameter tensor that
+  AdamW/SGD never do.
+- **Muon's state memory is close to SGD's** (1.04x — most parameters are
+  transformer hidden matrices that only get a momentum buffer, not a full
+  AdamW-style state), but it is the **slowest** optimizer measured, at 2.0x
+  AdamW's per-step time — the `O(N³)` Newton-Schulz term above
+  (`zeropower_via_newtonschulz`, 5 matrix-matrix-multiply iterations per
+  hidden weight matrix per step), the only super-linear, non-elementwise
+  cost of the four. At this model's width (d_model=128, mlp hidden=512)
+  that overhead is still small in absolute wall-clock terms, but per the
+  asymptotic argument above it should grow, not shrink, at larger widths.
+- **Peak CUDA memory is ~identical across all four (313-320 MB) at this
+  model's scale** — the state-memory differences above (kilobytes to a few
+  MB) are completely swamped by CUDA context and activation memory for a
+  toy model this small. The 200x state-memory advantage Nero shows
+  analytically would only become practically visible at a model scale
+  where optimizer state is a meaningful fraction of total memory —
+  untested here, since that's well outside this project's compute budget.
 
 ## Success criteria (declared before running any experiment)
 
@@ -599,6 +672,64 @@ Data: `results/core/raw_curves.csv` (columns: `optimizer, condition, lr,
 step, val_loss`), generated by `scripts/capture_raw_curves.py`.
 
 </details>
+
+### Practical takeaways: choosing an optimizer under different budgets
+
+Synthesizing the flat/schedule/hero comparisons above with the compute and
+memory numbers from Optimizer candidates — scenario-based guidance, not a
+universal ranking, since "best" depends on what's actually being optimized
+for (loss, robustness, wall-clock, or memory).
+
+1. **Short, unscheduled training (this project's original 500-step flat-LR
+   setup): Muon is the clear choice.** Best loss *and* ~3x wider basin than
+   AdamW — worth its ~2x per-step compute cost specifically because the
+   advantage is large here. Avoid SGD in this regime: it diverges over half
+   its sampled LR range and never gets close to AdamW's best either.
+2. **Schedule affordable, training still short (Setup A): the ranking
+   doesn't change, so the choice doesn't either.** The schedule narrows
+   things somewhat (Nero improves 5.8%, SGD's divergence range shrinks by
+   1/3) but Muon still wins outright — still worth the extra compute here.
+3. **Adequate training length + schedule (the hero run): this is where the
+   calculus flips.** AdamW ties Muon on both loss (within 1.4%) and basin
+   width, at roughly half Muon's per-step cost. If a normal training length
+   and schedule are affordable — which is standard practice regardless of
+   this project — **AdamW is the pragmatic default**; Muon's
+   architecture-awareness stops clearly paying for itself once these two
+   "free" fixes are in place.
+4. **Memory-constrained regimes: Nero's footprint is a real, distinct
+   reason to consider it, independent of the loss comparison.** Nero never
+   wins on loss in any tested condition, but its ~200x smaller optimizer
+   state (per-neuron stats, not per-parameter) is an axis of value the
+   loss/basin numbers don't capture at all. Not validated at a scale where
+   it would matter (this model's optimizer state is a few MB either way —
+   see Compute and memory footprint above) — but the mechanism (state size
+   scales with neuron count, not parameter count) is real and would matter
+   more, not less, at larger model scale.
+5. **Unattended / can't-babysit-the-run training: avoid SGD.** It's the
+   only optimizer that diverged anywhere in this project — in every sweep,
+   flat or scheduled, short or long (12/27 → 9/27 → 6/27 runs diverged
+   across the flat/schedule/hero conditions respectively). AdamW, Nero, and
+   Muon never diverged once, across all ~360 runs in this project's four
+   core-experiment sweeps combined. For a pipeline that can't tune LR
+   per-run, that zero-divergence property may matter more than small loss
+   differences.
+6. **Raw compute-constrained regimes (many small experiments, cheapest
+   possible per-step cost): SGD or AdamW**, both ~2x cheaper per step than
+   Nero/Muon (see Compute and memory footprint above) — if a schedule can
+   be afforded to tame SGD's instability, its simplicity may be worth the
+   small remaining loss gap, especially at longer horizons where that gap
+   is smallest anyway.
+
+**The meta-lesson, stated plainly:** most of this project's flashy
+500-step "Muon wins outright" headline turned out to be a training-hygiene
+artifact, not a fundamental algorithmic result — always rule out a missing
+schedule or inadequate training length before concluding one optimizer is
+intrinsically better than another. That said, two properties survived
+every condition tested and aren't hygiene-dependent: **architecture-aware
+optimizers (Nero, Muon) never diverged**, in any of ~360 runs, and
+**Nero's per-neuron memory footprint is structurally, not incidentally,
+smaller** — both are real reasons to reach for them regardless of whether
+the loss gap has been closed by other means.
 
 ### Ablation: does removing LayerNorm's affine params help Nero?
 
